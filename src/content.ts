@@ -1,0 +1,1099 @@
+// Content script - displays workflow status overlay on the page
+
+class WorkflowOverlay {
+  private container: HTMLDivElement | null = null;
+  private textElement: HTMLSpanElement | null = null;
+  private stateElement: HTMLDivElement | null = null;
+
+  create() {
+    if (this.container) return;
+
+    this.container = document.createElement('div');
+    this.container.id = 'shopenginx-overlay';
+    this.container.style.cssText = `
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      z-index: 999999;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: all 0.3s ease;
+      opacity: 0;
+      transform: translateY(-10px);
+      max-width: 320px;
+    `;
+
+    // Header with spinner and node name
+    const header = document.createElement('div');
+    header.style.cssText = `
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    `;
+
+    // Spinner
+    const spinner = document.createElement('div');
+    spinner.style.cssText = `
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: shopenginx-spin 0.8s linear infinite;
+      flex-shrink: 0;
+    `;
+
+    // Add keyframes
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes shopenginx-spin {
+        to { transform: rotate(360deg); }
+      }
+    `;
+    document.head.appendChild(style);
+
+    // Text element (node name)
+    this.textElement = document.createElement('span');
+    this.textElement.style.cssText = `font-weight: 600; font-size: 14px;`;
+    this.textElement.textContent = 'Starting...';
+
+    header.appendChild(spinner);
+    header.appendChild(this.textElement);
+
+    // State element (context state display)
+    this.stateElement = document.createElement('div');
+    this.stateElement.style.cssText = `
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 11px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      line-height: 1.5;
+      display: none;
+    `;
+
+    this.container.appendChild(header);
+    this.container.appendChild(this.stateElement);
+    document.body.appendChild(this.container);
+
+    // Animate in
+    requestAnimationFrame(() => {
+      if (this.container) {
+        this.container.style.opacity = '1';
+        this.container.style.transform = 'translateY(0)';
+      }
+    });
+  }
+
+  setText(text: string) {
+    if (!this.container) {
+      this.create();
+    }
+    if (this.textElement) {
+      this.textElement.textContent = text;
+    }
+  }
+
+  setNodeName(nodeName: string, state?: Record<string, unknown>) {
+    if (!this.container) {
+      this.create();
+    }
+    if (this.textElement) {
+      this.textElement.textContent = `Node: ${nodeName}`;
+    }
+    if (this.stateElement && state) {
+      const lines: string[] = [];
+
+      // Show images count if available
+      const images = state.images as string[] | undefined;
+      if (images) {
+        lines.push(`images: ${images.length}`);
+      }
+
+      // Show current image index
+      if (state.currentImageIndex !== undefined) {
+        lines.push(`ImageIndex: ${state.currentImageIndex}`);
+      }
+
+      // Boolean state flags
+      const boolKeys = [
+        'isSettingsConfigured',
+        'isImageUploaded',
+        'isPromptFilled',
+        'isCreateClicked',
+        'isCreateImageModeSelected',
+        'isImagePickerOpen',
+        'isCropDialogOpen'
+      ];
+
+      boolKeys.forEach(key => {
+        if (state[key] !== undefined) {
+          const icon = state[key] === true ? '✓' : '✗';
+          const shortKey = key.replace(/^is/, '');
+          lines.push(`${shortKey}: ${icon}`);
+        }
+      });
+
+      if (lines.length > 0) {
+        this.stateElement.innerHTML = lines.join('<br>');
+        this.stateElement.style.display = 'block';
+      } else {
+        this.stateElement.style.display = 'none';
+      }
+    } else if (this.stateElement) {
+      this.stateElement.style.display = 'none';
+    }
+  }
+
+  hide() {
+    if (this.container) {
+      this.container.style.opacity = '0';
+      this.container.style.transform = 'translateY(-10px)';
+      setTimeout(() => {
+        this.container?.remove();
+        this.container = null;
+        this.textElement = null;
+      }, 300);
+    }
+  }
+}
+
+const overlay = new WorkflowOverlay();
+
+// Listen for messages from extension
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  switch (message.type) {
+    case 'OVERLAY_SHOW':
+      overlay.create();
+      overlay.setText(message.text);
+      sendResponse({ success: true });
+      break;
+
+    case 'OVERLAY_UPDATE':
+      overlay.setText(message.text);
+      sendResponse({ success: true });
+      break;
+
+    case 'OVERLAY_HIDE':
+      overlay.hide();
+      sendResponse({ success: true });
+      break;
+
+    case 'OVERLAY_NODE_NAME':
+      overlay.create();
+      overlay.setNodeName(message.text, message.state);
+      sendResponse({ success: true });
+      break;
+
+    case 'PING':
+      sendResponse({ ready: true });
+      break;
+
+    case 'CLICK_ELEMENT':
+      try {
+        let element: HTMLElement | null = null;
+
+        // If selector provided, try it first
+        if (message.selector) {
+          element = document.querySelector(message.selector);
+        }
+
+        // If text provided, find element by text content
+        if (!element && message.text) {
+          const elements = document.querySelectorAll('button, a, [role="button"], [role="radio"]');
+          for (const el of elements) {
+            if (el.textContent?.includes(message.text)) {
+              element = el as HTMLElement;
+              break;
+            }
+          }
+        }
+
+        if (element) {
+          element.click();
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: 'Element not found' });
+        }
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CHECK_IMAGE_TAB_ACTIVE':
+      try {
+        // Find the Images radio button and check if it's active
+        const radios = document.querySelectorAll('[role="radio"]');
+        let isImageTabActive = false;
+        for (const radio of radios) {
+          if (radio.textContent?.includes('Images')) {
+            isImageTabActive = radio.getAttribute('aria-checked') === 'true' ||
+              radio.classList.contains('active') ||
+              radio.hasAttribute('checked');
+            break;
+          }
+        }
+        sendResponse({ success: true, isActive: isImageTabActive });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CLICK_IMAGE_TAB':
+      try {
+        const radios = document.querySelectorAll('[role="radio"]');
+        let clicked = false;
+        for (const radio of radios) {
+          if (radio.textContent?.includes('Images')) {
+            (radio as HTMLElement).click();
+            clicked = true;
+            break;
+          }
+        }
+        sendResponse({ success: clicked });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'SELECT_CREATE_IMAGE_MODE':
+      try {
+        // Find the mode selector button with arrow_drop_down
+        let modeSelector: HTMLElement | null = null;
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.includes('arrow_drop_down')) {
+            modeSelector = btn as HTMLElement;
+            break;
+          }
+        }
+
+        if (modeSelector) {
+          modeSelector.click();
+
+          // Wait for dropdown (listbox) to appear and click "Create Image" option
+          setTimeout(() => {
+            const listbox = document.querySelector('[role="listbox"]');
+            if (listbox) {
+              const options = listbox.querySelectorAll('[role="option"]');
+              for (const option of options) {
+                if (option.textContent?.includes('Create Image')) {
+                  (option as HTMLElement).click();
+                  sendResponse({ success: true });
+                  return;
+                }
+              }
+            }
+            sendResponse({ success: false, error: 'Create Image option not found in listbox' });
+          }, 300);
+        } else {
+          sendResponse({ success: false, error: 'Mode selector button not found' });
+        }
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      return true; // Keep channel open for async response
+
+    case 'CHECK_CREATE_IMAGE_MODE':
+      try {
+        // Check if mode selector button shows "Create Image"
+        let isCreateImage = false;
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.includes('arrow_drop_down')) {
+            isCreateImage = btn.textContent?.includes('Create Image') ?? false;
+            break;
+          }
+        }
+        sendResponse({ success: true, isCreateImage });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'FILL_PROMPT':
+      try {
+        const prompt = message.prompt || '';
+        // Find the prompt textbox
+        const textbox = document.querySelector('textarea, input[type="text"]') as HTMLInputElement | HTMLTextAreaElement;
+
+        // Also try finding by placeholder
+        let promptInput = textbox;
+        if (!promptInput) {
+          const inputs = document.querySelectorAll('input, textarea');
+          for (const input of inputs) {
+            const placeholder = (input as HTMLInputElement).placeholder || '';
+            if (placeholder.includes('Generate') || placeholder.includes('prompt')) {
+              promptInput = input as HTMLInputElement;
+              break;
+            }
+          }
+        }
+
+        if (promptInput) {
+          promptInput.focus();
+          promptInput.value = prompt;
+          promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+          promptInput.dispatchEvent(new Event('change', { bubbles: true }));
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: 'Prompt textbox not found' });
+        }
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CLICK_CREATE':
+      try {
+        // Find and click the Create button (has arrow_forward icon)
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.includes('Create') && btn.textContent?.includes('arrow_forward') && !btn.hasAttribute('disabled')) {
+            (btn as HTMLElement).click();
+            sendResponse({ success: true });
+            return;
+          }
+        }
+        sendResponse({ success: false, error: 'Create button not found or disabled' });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'OPEN_SETTINGS':
+      try {
+        // Click the Settings button to open settings dialog
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.includes('Settings')) {
+            btn.click();
+            sendResponse({ success: true });
+            return;
+          }
+        }
+        sendResponse({ success: false, error: 'Settings button not found' });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'SET_ASPECT_RATIO':
+      try {
+        // Find and click Aspect Ratio combobox in dialog
+        const dialog = document.querySelector('[role="dialog"]');
+        if (!dialog) {
+          sendResponse({ success: false, error: 'Settings dialog not open' });
+          return;
+        }
+
+        const comboboxes = dialog.querySelectorAll('[role="combobox"]');
+        let aspectCombobox: HTMLElement | null = null;
+        for (const cb of comboboxes) {
+          if (cb.textContent?.includes('Aspect Ratio')) {
+            aspectCombobox = cb as HTMLElement;
+            break;
+          }
+        }
+
+        if (!aspectCombobox) {
+          sendResponse({ success: false, error: 'Aspect Ratio combobox not found' });
+          return;
+        }
+
+        aspectCombobox.click();
+
+        // Wait for dropdown and select option
+        setTimeout(() => {
+          const options = document.querySelectorAll('[role="option"]');
+          const targetRatio = message.ratio === '16:9' ? 'Landscape' : 'Portrait';
+          for (const option of options) {
+            if (option.textContent?.includes(targetRatio)) {
+              (option as HTMLElement).click();
+              sendResponse({ success: true });
+              return;
+            }
+          }
+          sendResponse({ success: false, error: 'Aspect ratio option not found' });
+        }, 300);
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      return true;
+
+    case 'SET_OUTPUT_COUNT':
+      try {
+        // Find and click Outputs per prompt combobox in dialog
+        const dialog2 = document.querySelector('[role="dialog"]');
+        if (!dialog2) {
+          sendResponse({ success: false, error: 'Settings dialog not open' });
+          return;
+        }
+
+        const comboboxes2 = dialog2.querySelectorAll('[role="combobox"]');
+        let outputCombobox: HTMLElement | null = null;
+        for (const cb of comboboxes2) {
+          if (cb.textContent?.includes('Outputs per prompt')) {
+            outputCombobox = cb as HTMLElement;
+            break;
+          }
+        }
+
+        if (!outputCombobox) {
+          sendResponse({ success: false, error: 'Outputs combobox not found' });
+          return;
+        }
+
+        outputCombobox.click();
+
+        // Wait for dropdown and select option
+        setTimeout(() => {
+          const options = document.querySelectorAll('[role="option"]');
+          const targetCount = String(message.count);
+          for (const option of options) {
+            if (option.textContent?.trim() === targetCount) {
+              (option as HTMLElement).click();
+              sendResponse({ success: true });
+              return;
+            }
+          }
+          sendResponse({ success: false, error: 'Output count option not found' });
+        }, 300);
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      return true;
+
+    case 'CLOSE_SETTINGS':
+      try {
+        // Press Escape to close dialog
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        sendResponse({ success: true });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CHECK_IMAGE_PICKER_OPEN':
+      try {
+        // Check if file input exists on the page
+        const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+        const isOpen = fileInput !== null;
+        console.log('[CHECK_IMAGE_PICKER_OPEN] File input exists:', isOpen);
+        sendResponse({ success: true, isOpen });
+      } catch (e) {
+        console.log('[CHECK_IMAGE_PICKER_OPEN] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'OPEN_IMAGE_PICKER':
+      try {
+        console.log('[OPEN_IMAGE_PICKER] Finding add button in prompt area...');
+        // Find the add button in the prompt area using role="presentation"
+        const promptArea = document.querySelector('[role="presentation"]');
+        let addButton: HTMLElement | null = null;
+
+        if (promptArea) {
+          const buttons = promptArea.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (btn.textContent?.trim() === 'add') {
+              addButton = btn as HTMLElement;
+              break;
+            }
+          }
+        }
+
+        if (addButton) {
+          const rect = addButton.getBoundingClientRect();
+          console.log('[OPEN_IMAGE_PICKER] Add button found at x:', rect.x, 'y:', rect.y);
+          addButton.click();
+          console.log('[OPEN_IMAGE_PICKER] Add button clicked');
+          sendResponse({ success: true });
+        } else {
+          console.log('[OPEN_IMAGE_PICKER] Add button NOT found in prompt area');
+          sendResponse({ success: false, error: 'Add button not found in prompt area' });
+        }
+      } catch (e) {
+        console.log('[OPEN_IMAGE_PICKER] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'UPLOAD_FILE':
+      try {
+        console.log('[UPLOAD_FILE] Starting upload...');
+        const base64Image: string = message.image || '';
+        if (!base64Image) {
+          console.log('[UPLOAD_FILE] No image provided');
+          sendResponse({ success: false, error: 'No image provided' });
+          return;
+        }
+
+        console.log('[UPLOAD_FILE] Image data length:', base64Image.length);
+
+        // Convert base64 to File
+        const arr = base64Image.split(',');
+        const mimeMatch = arr[0].match(/:(.*?);/);
+        const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+        const bstr = atob(arr[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        const ext = mime.includes('png') ? 'png' : mime.includes('jpeg') ? 'jpg' : 'webp';
+        const file = new File([u8arr], `image.${ext}`, { type: mime });
+        console.log('[UPLOAD_FILE] File created:', file.name, file.size, 'bytes');
+
+        // Find file input and upload
+        const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+        console.log('[UPLOAD_FILE] File input found:', !!fileInput);
+        if (fileInput) {
+          const dataTransfer = new DataTransfer();
+          dataTransfer.items.add(file);
+          fileInput.files = dataTransfer.files;
+          console.log('[UPLOAD_FILE] Dispatching change event...');
+          fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+          fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+          console.log('[UPLOAD_FILE] Upload complete');
+          sendResponse({ success: true });
+        } else {
+          console.log('[UPLOAD_FILE] File input NOT found');
+          sendResponse({ success: false, error: 'File input not found' });
+        }
+      } catch (e) {
+        console.log('[UPLOAD_FILE] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CHECK_CROP_DIALOG_OPEN':
+      try {
+        // Check if crop dialog is visible (has "Crop and Save" button)
+        const buttons = document.querySelectorAll('button');
+        let isOpen = false;
+        for (const btn of buttons) {
+          if (btn.textContent?.includes('Crop and Save')) {
+            isOpen = true;
+            break;
+          }
+        }
+        console.log('[CHECK_CROP_DIALOG_OPEN] Crop dialog open:', isOpen);
+        sendResponse({ success: true, isOpen });
+      } catch (e) {
+        console.log('[CHECK_CROP_DIALOG_OPEN] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CHECK_ALL_IMAGES_UPLOADED':
+      try {
+        const expectedCount: number = message.expectedCount || 0;
+        console.log('[CHECK_ALL_IMAGES_UPLOADED] Expected count:', expectedCount);
+
+        // Check 1: Look for spinner (progress_activity) in prompt box area
+        let hasSpinnerInPromptBox = false;
+        const promptArea = document.querySelector('[role="presentation"]');
+        if (promptArea) {
+          const spinnerElements = promptArea.querySelectorAll('span, div');
+          for (const el of spinnerElements) {
+            if (el.textContent === 'progress_activity') {
+              hasSpinnerInPromptBox = true;
+              break;
+            }
+          }
+        }
+        console.log('[CHECK_ALL_IMAGES_UPLOADED] Has spinner in prompt box:', hasSpinnerInPromptBox);
+
+        // Check 2: Count images in prompt box (buttons with "ingredient" text)
+        let promptBoxImageCount = 0;
+        const ingredientButtons = document.querySelectorAll('button');
+        for (const btn of ingredientButtons) {
+          const text = btn.textContent || '';
+          if (text.includes('This is your ingredient')) {
+            promptBoxImageCount++;
+          }
+        }
+        console.log('[CHECK_ALL_IMAGES_UPLOADED] Prompt box image count:', promptBoxImageCount);
+
+        // Check 3: Look for disabled button slots in prompt area (uploading in progress)
+        let hasDisabledSlot = false;
+        if (promptArea) {
+          const disabledButtons = promptArea.querySelectorAll('button[disabled]');
+          for (const btn of disabledButtons) {
+            const text = btn.textContent || '';
+            // Exclude Create button and other non-image buttons
+            if (!text.includes('Create') && !text.includes('Nano') && !text.includes('add')) {
+              hasDisabledSlot = true;
+              break;
+            }
+          }
+        }
+        console.log('[CHECK_ALL_IMAGES_UPLOADED] Has disabled slot:', hasDisabledSlot);
+
+        // Determine if all images are uploaded
+        const isComplete = !hasSpinnerInPromptBox &&
+                          !hasDisabledSlot &&
+                          promptBoxImageCount >= expectedCount &&
+                          expectedCount > 0;
+
+        console.log('[CHECK_ALL_IMAGES_UPLOADED] Is complete:', isComplete);
+
+        sendResponse({
+          success: true,
+          isComplete,
+          hasSpinnerInPromptBox,
+          hasDisabledSlot,
+          promptBoxImageCount,
+          expectedCount,
+          imagesRemaining: expectedCount - promptBoxImageCount
+        });
+      } catch (e) {
+        console.log('[CHECK_ALL_IMAGES_UPLOADED] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'HANDLE_CROP_DIALOG':
+      (async () => {
+        try {
+          const aspectRatio: string = message.aspectRatio || '9:16';
+          const isPortrait = aspectRatio === '9:16';
+          const targetText = isPortrait ? 'Portrait' : 'Landscape';
+
+          // Find and click aspect ratio dropdown if needed
+          const comboboxes = document.querySelectorAll('[role="combobox"], button');
+          for (const el of comboboxes) {
+            const text = el.textContent || '';
+            if ((text.includes('Landscape') || text.includes('Portrait')) && text.includes('arrow_drop_down')) {
+              if (!text.includes(targetText)) {
+                (el as HTMLElement).click();
+                await new Promise(resolve => setTimeout(resolve, 300));
+                const options = document.querySelectorAll('[role="option"]');
+                for (const option of options) {
+                  if (option.textContent?.includes(targetText)) {
+                    (option as HTMLElement).click();
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    break;
+                  }
+                }
+              }
+              break;
+            }
+          }
+
+          // Click "Crop and Save"
+          const buttons = document.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (btn.textContent?.includes('Crop and Save')) {
+              (btn as HTMLElement).click();
+              sendResponse({ success: true });
+              return;
+            }
+          }
+          sendResponse({ success: false, error: 'Crop and Save button not found' });
+        } catch (e) {
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true; // Keep channel open for async
+
+    case 'UPLOAD_IMAGES':
+      try {
+        const base64Images: string[] = message.images || [];
+        const aspectRatio: string = message.aspectRatio || '9:16'; // Default to Portrait
+
+        if (base64Images.length === 0) {
+          sendResponse({ success: false, error: 'No images provided' });
+          return;
+        }
+
+        // Helper function to convert base64 to File
+        const base64ToFile = (base64: string, filename: string): File => {
+          const arr = base64.split(',');
+          const mimeMatch = arr[0].match(/:(.*?);/);
+          const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+          const bstr = atob(arr[1]);
+          let n = bstr.length;
+          const u8arr = new Uint8Array(n);
+          while (n--) {
+            u8arr[n] = bstr.charCodeAt(n);
+          }
+          return new File([u8arr], filename, { type: mime });
+        };
+
+        // Helper: delay function
+        const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+        // Upload to file input element
+        const uploadToFileInput = async (fileInput: HTMLInputElement, file: File): Promise<void> => {
+          console.log('[ShopEnginX] Uploading to file input...');
+
+          // Create DataTransfer and add file
+          const dataTransfer = new DataTransfer();
+          dataTransfer.items.add(file);
+
+          // Set files on the input element
+          fileInput.files = dataTransfer.files;
+
+          // Dispatch change event
+          fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+          // Dispatch input event
+          fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+          console.log('[ShopEnginX] File upload events dispatched');
+        };
+
+        // Find the + button in prompt area
+        const findAddButton = (): HTMLElement | null => {
+          // Look for button with "add" text
+          const buttons = document.querySelectorAll('button');
+          for (const btn of buttons) {
+            const text = btn.textContent?.trim();
+            if (text === 'add') {
+              console.log('[ShopEnginX] Found + button');
+              return btn as HTMLElement;
+            }
+          }
+          return null;
+        };
+
+        // Select aspect ratio in crop dialog
+        const selectAspectRatio = async (ratio: string): Promise<boolean> => {
+          // ratio is '9:16' (Portrait) or '16:9' (Landscape)
+          const isPortrait = ratio === '9:16';
+          const targetText = isPortrait ? 'Portrait' : 'Landscape';
+
+          console.log(`[ShopEnginX] Selecting aspect ratio: ${targetText}`);
+
+          // Find the aspect ratio dropdown (combobox)
+          const comboboxes = document.querySelectorAll('[role="combobox"], button');
+          let dropdownButton: HTMLElement | null = null;
+
+          for (const el of comboboxes) {
+            const text = el.textContent || '';
+            // Look for button containing "Landscape" or "Portrait" with arrow_drop_down
+            if ((text.includes('Landscape') || text.includes('Portrait')) && text.includes('arrow_drop_down')) {
+              dropdownButton = el as HTMLElement;
+              break;
+            }
+            // Also check for crop_16_9 or crop_9_16 icons
+            if (text.includes('crop_16_9') || text.includes('crop_9_16')) {
+              dropdownButton = el as HTMLElement;
+              break;
+            }
+          }
+
+          if (!dropdownButton) {
+            console.log('[ShopEnginX] Aspect ratio dropdown not found');
+            return false;
+          }
+
+          // Check if we need to change it (if current selection doesn't match target)
+          const currentText = dropdownButton.textContent || '';
+          if (currentText.includes(targetText)) {
+            console.log(`[ShopEnginX] Aspect ratio already set to ${targetText}`);
+            return true;
+          }
+
+          // Click to open dropdown
+          console.log('[ShopEnginX] Opening aspect ratio dropdown...');
+          dropdownButton.click();
+          await delay(300);
+
+          // Find and click the target option
+          const options = document.querySelectorAll('[role="option"]');
+          for (const option of options) {
+            const optionText = option.textContent || '';
+            if (optionText.includes(targetText)) {
+              console.log(`[ShopEnginX] Clicking ${targetText} option`);
+              (option as HTMLElement).click();
+              await delay(300);
+              return true;
+            }
+          }
+
+          console.log(`[ShopEnginX] ${targetText} option not found`);
+          return false;
+        };
+
+        // Wait for crop dialog and click "Crop and Save"
+        const handleCropDialog = async (ratio: string): Promise<boolean> => {
+          // Wait for crop dialog to appear (max 5 seconds)
+          for (let i = 0; i < 10; i++) {
+            await delay(500);
+
+            // Look for "Crop and Save" button to confirm dialog is open
+            const buttons = document.querySelectorAll('button');
+            let cropAndSaveBtn: HTMLElement | null = null;
+
+            for (const btn of buttons) {
+              if (btn.textContent?.includes('Crop and Save')) {
+                cropAndSaveBtn = btn as HTMLElement;
+                break;
+              }
+            }
+
+            if (cropAndSaveBtn) {
+              console.log('[ShopEnginX] Crop dialog found');
+
+              // Select aspect ratio first
+              await selectAspectRatio(ratio);
+              await delay(300);
+
+              // Then click Crop and Save
+              console.log('[ShopEnginX] Clicking Crop and Save button...');
+              cropAndSaveBtn.click();
+              return true;
+            }
+
+            console.log(`[ShopEnginX] Waiting for crop dialog... (${i + 1}/10)`);
+          }
+          console.log('[ShopEnginX] Crop dialog not found after waiting');
+          return false;
+        };
+
+        // Convert first image to File
+        const ext = base64Images[0].includes('image/png') ? 'png' :
+          base64Images[0].includes('image/jpeg') ? 'jpg' :
+            base64Images[0].includes('image/webp') ? 'webp' : 'png';
+        const file = base64ToFile(base64Images[0], `image_1.${ext}`);
+
+        (async () => {
+          // Step 1: Find and click the + button to open menu
+          const addButton = findAddButton();
+          if (!addButton) {
+            console.log('[ShopEnginX] Add button not found');
+            sendResponse({ success: false, error: 'Add button not found' });
+            return;
+          }
+
+          // Click the + button
+          console.log('[ShopEnginX] Clicking + button to open image picker');
+          addButton.click();
+
+          // Step 2: Wait a bit for menu to open and file input to be available
+          await delay(300);
+
+          // Look for file input (it should exist on the page)
+          let fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+
+          if (!fileInput) {
+            console.log('[ShopEnginX] File input not found immediately, waiting...');
+            await delay(500);
+            fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+          }
+
+          if (fileInput) {
+            console.log('[ShopEnginX] Found file input, uploading...');
+            await uploadToFileInput(fileInput, file);
+
+            // Step 3: Wait for and handle crop dialog (with aspect ratio selection)
+            console.log('[ShopEnginX] Waiting for crop dialog...');
+            const cropHandled = await handleCropDialog(aspectRatio);
+
+            if (cropHandled) {
+              // Wait a moment for the image to be processed
+              await delay(1000);
+              console.log('[ShopEnginX] Image uploaded successfully');
+              sendResponse({ success: true });
+            } else {
+              // Crop dialog didn't appear - image might have been uploaded directly
+              console.log('[ShopEnginX] Crop dialog not found, checking if upload succeeded...');
+              sendResponse({ success: true });
+            }
+          } else {
+            // File input not found, try clicking Upload button in menu
+            console.log('[ShopEnginX] File input not found, looking for Upload button in menu...');
+            const menuButtons = document.querySelectorAll('button');
+            let uploadButton: HTMLElement | null = null;
+
+            for (const btn of menuButtons) {
+              if (btn.textContent?.includes('Upload') && btn.textContent?.includes('.png')) {
+                uploadButton = btn as HTMLElement;
+                break;
+              }
+            }
+
+            if (uploadButton) {
+              console.log('[ShopEnginX] Found Upload button, clicking...');
+              uploadButton.click();
+
+              await delay(300);
+              fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+
+              if (fileInput) {
+                console.log('[ShopEnginX] Found file input after clicking Upload');
+                await uploadToFileInput(fileInput, file);
+
+                // Handle crop dialog (with aspect ratio selection)
+                const cropHandled = await handleCropDialog(aspectRatio);
+                if (cropHandled) {
+                  await delay(1000);
+                }
+                sendResponse({ success: true });
+              } else {
+                console.log('[ShopEnginX] File input still not found');
+                sendResponse({ success: false, error: 'File input not found' });
+              }
+            } else {
+              console.log('[ShopEnginX] Upload button not found in menu');
+              sendResponse({ success: false, error: 'Upload button not found' });
+            }
+          }
+        })();
+
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      return true; // Keep channel open for async response
+
+    case 'GENERATE_IMAGES':
+      try {
+        // Find and click the Create button
+        const createButtons = document.querySelectorAll('button');
+        let createButton: HTMLElement | null = null;
+        for (const btn of createButtons) {
+          if (btn.textContent?.includes('Create') && !btn.hasAttribute('disabled')) {
+            createButton = btn as HTMLElement;
+            break;
+          }
+        }
+
+        if (createButton) {
+          createButton.click();
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: 'Create button not found or disabled' });
+        }
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'CHECK_GENERATION_STATUS':
+      try {
+        // Detection logic for Google Flow image generation status:
+        // ONLY check for percentage text (XX%) - this is the reliable loading indicator
+        // Note: Create button disabled state is NOT reliable because it stays disabled
+        // when prompt is empty (which happens after generation completes)
+
+        // Check for percentage text (loading indicator)
+        let hasPercentage = false;
+        const textWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (textWalker.nextNode()) {
+          const text = textWalker.currentNode.textContent?.trim() || '';
+          if (/^\d{1,3}%$/.test(text)) {
+            hasPercentage = true;
+            console.log('[CHECK_GENERATION_STATUS] Found loading percentage:', text);
+            break;
+          }
+        }
+
+        // Generation is loading ONLY if percentage text exists
+        const isLoading = hasPercentage;
+        const isComplete = !isLoading;
+
+        console.log('[CHECK_GENERATION_STATUS] Status:', { hasPercentage, isLoading, isComplete });
+
+        sendResponse({
+          success: true,
+          complete: isComplete,
+          isLoading,
+          hasPercentage
+        });
+      } catch (e) {
+        console.log('[CHECK_GENERATION_STATUS] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'GET_IMAGE_COUNT':
+      try {
+        // Count all completed images (Flow Image: prefix in alt text)
+        const flowImages = document.querySelectorAll('img[alt^="Flow Image:"]');
+        console.log('[GET_IMAGE_COUNT] Found', flowImages.length, 'images');
+        sendResponse({ success: true, count: flowImages.length });
+      } catch (e) {
+        console.log('[GET_IMAGE_COUNT] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'DOWNLOAD_NEW_IMAGES':
+      try {
+        const previousCount: number = message.previousCount || 0;
+        const newImageCount: number = message.newImageCount || 4;
+
+        console.log('[DOWNLOAD_NEW_IMAGES] Previous count:', previousCount, 'New images to download:', newImageCount);
+
+        // Get all completed images
+        const allFlowImages = document.querySelectorAll('img[alt^="Flow Image:"]');
+        const totalImages = allFlowImages.length;
+
+        console.log('[DOWNLOAD_NEW_IMAGES] Total images found:', totalImages);
+
+        // New images are at the top (first N images where N = totalImages - previousCount)
+        const newImagesCount = Math.min(newImageCount, totalImages - previousCount);
+
+        if (newImagesCount <= 0) {
+          console.log('[DOWNLOAD_NEW_IMAGES] No new images to download');
+          sendResponse({ success: true, downloaded: 0 });
+          return;
+        }
+
+        // Get the new images (they appear at the top/beginning)
+        const newImages = Array.from(allFlowImages).slice(0, newImagesCount);
+
+        console.log('[DOWNLOAD_NEW_IMAGES] Downloading', newImages.length, 'new images');
+
+        // Download each new image
+        let downloadedCount = 0;
+        newImages.forEach((img, index) => {
+          const imgElement = img as HTMLImageElement;
+          const src = imgElement.src;
+
+          if (src && src.startsWith('https://')) {
+            // Create a download link
+            const link = document.createElement('a');
+            link.href = src;
+            link.download = `flow_image_${Date.now()}_${index + 1}.png`;
+            link.target = '_blank';
+
+            // Trigger download
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            downloadedCount++;
+            console.log(`[DOWNLOAD_NEW_IMAGES] Downloaded image ${index + 1}:`, link.download);
+          }
+        });
+
+        console.log('[DOWNLOAD_NEW_IMAGES] Successfully downloaded', downloadedCount, 'images');
+        sendResponse({ success: true, downloaded: downloadedCount });
+      } catch (e) {
+        console.log('[DOWNLOAD_NEW_IMAGES] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    default:
+      sendResponse({ success: false, error: 'Unknown message type' });
+  }
+
+  return true;
+});
+
+console.log('[ShopEnginX] Content script loaded');

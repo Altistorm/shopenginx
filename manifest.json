@@ -9,7 +9,8 @@
     "unlimitedStorage",
     "sidePanel",
     "downloads",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "https://labs.google/*",
@@ -28,6 +29,13 @@
     "service_worker": "src/background.ts",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://labs.google/*"],
+      "js": ["src/content.ts"],
+      "run_at": "document_idle"
+    }
+  ],
   "icons": {
     "128": "public/icon.svg"
   }

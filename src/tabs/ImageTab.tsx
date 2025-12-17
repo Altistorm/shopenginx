@@ -1,4 +1,7 @@
 import { useState } from 'react'
+import { workflowManager } from '../workflow'
+import { ImageFlowContext } from '../flowWorkflow'
+import '../flowWorkflow' // Register workflow
 
 interface ImageSet {
   id: string
@@ -15,34 +18,194 @@ function ImageTab() {
   const [multiSetMode, setMultiSetMode] = useState<'none' | 'multi' | 'sameModel'>('none')
   const [setCount, setSetCount] = useState(2)
   const [imageSets, setImageSets] = useState<ImageSet[]>([])
+  const [sharedModelImage, setSharedModelImage] = useState<string | null>(null)
   const [aspectRatio, setAspectRatio] = useState('9:16')
   const [imageCount, setImageCount] = useState(4)
   const [noTextOnImage, setNoTextOnImage] = useState(false)
   const [autoSaveImage, setAutoSaveImage] = useState(false)
   const [enableLoop, setEnableLoop] = useState(false)
   const [loopCount, setLoopCount] = useState(5)
+  const [autoRunWorkflow, setAutoRunWorkflow] = useState(true)
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
+  const [isRunning, setIsRunning] = useState(false)
+  const [currentImageIndex, setCurrentImageIndex] = useState(0)
+  const [isSettingsConfigured, setIsSettingsConfigured] = useState(false)
+  const [isImageUploaded, setIsImageUploaded] = useState(false)
+  const [isPromptFilled, setIsPromptFilled] = useState(false)
+  const [isCreateClicked, setIsCreateClicked] = useState(false)
+
+  const [validationError, setValidationError] = useState<string | null>(null)
 
   const handleCreate = async () => {
+    // Validation
+    setValidationError(null)
+
+    if (multiSetMode === 'none') {
+      // Single mode: require at least one image
+      if (images.length === 0) {
+        setValidationError('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')
+        return
+      }
+    } else {
+      // Multi-set mode: require at least one product image in each set
+      const emptySet = imageSets.find(set => !set.product)
+      if (emptySet) {
+        setValidationError('กรุณาเพิ่มรูปสินค้าในทุกชุด')
+        return
+      }
+    }
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
 
+    // Create context from current state
+    const context: ImageFlowContext = {
+      images,
+      style,
+      productName,
+      modelType,
+      aspectRatio,
+      imageCount,
+      noTextOnImage,
+      imageText,
+      scene,
+      currentImageIndex,
+      isSettingsConfigured,
+      isImageUploaded,
+      isPromptFilled,
+      isCreateClicked,
+      autoSaveImage,
+    }
+
+    // Set tab ID if we are on Flow
     if (tab?.url?.startsWith('https://labs.google')) {
-      // Already on labs.google - proceed with creation
-      console.log('Ready to create on labs.google')
-      // TODO: Add your creation logic here
-    } else {
-      // Open new tab with labs.google
-      chrome.tabs.create({
-        url: 'https://labs.google/fx/tools/flow',
-        active: true
-      })
+      context.tabId = tab.id
+    }
+
+    setIsRunning(true)
+    try {
+      // Get current node based on browser state
+      let currentNode = await workflowManager.getCurrentNode('image')
+
+      if (!currentNode) {
+        throw new Error('Could not determine current workflow state')
+      }
+
+      console.log('Current node:', currentNode.id)
+      console.log('Auto Run Workflow:', autoRunWorkflow)
+
+      // Helper function to get action name
+      const getActionName = async (node: typeof currentNode, ctx: typeof context): Promise<string | null> => {
+        // Try to get action from node's ActionResolver (for nodes with dynamic actions)
+        let actionName = await node.determineAction(ctx)
+
+        // Fallback to switch-case for nodes without ActionResolver
+        if (!actionName) {
+          switch (node.id) {
+            case 'browser':
+              actionName = 'openFlow'
+              break
+            case 'flowHomePage':
+              actionName = 'ensureImageTabAndClickNewProject'
+              break
+            case 'projectEditorWithImages':
+              actionName = 'configureSettings'
+              break
+            case 'projectEditorConfigured':
+              actionName = 'generate'
+              break
+            default:
+              console.warn(`No automatic action for node: ${node.id}`)
+              return null
+          }
+        }
+        return actionName
+      }
+
+      if (autoRunWorkflow) {
+        // Auto Run: Loop until workflow is complete
+        let actionName = await getActionName(currentNode, context)
+        let iterationCount = 0
+        const MAX_ITERATIONS = 100 // Safety limit
+
+        while (actionName && iterationCount < MAX_ITERATIONS) {
+          iterationCount++
+          console.log(`[Auto Run] Iteration ${iterationCount}: Running action "${actionName}" on node "${currentNode.id}"`)
+
+          await currentNode.runAction(actionName, context)
+
+          // Re-detect current node (URL may have changed)
+          currentNode = await workflowManager.getCurrentNode('image')
+          if (!currentNode) {
+            console.log('[Auto Run] No current node detected, workflow may be complete')
+            break
+          }
+
+          // Get next action
+          actionName = await getActionName(currentNode, context)
+
+          // Small delay between actions to prevent overwhelming the browser
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+
+        if (iterationCount >= MAX_ITERATIONS) {
+          console.warn('[Auto Run] Reached maximum iterations, stopping')
+        }
+
+        console.log(`[Auto Run] Workflow completed after ${iterationCount} iterations`)
+
+      } else {
+        // Single Step: Run one action only
+        const actionName = await getActionName(currentNode, context)
+
+        if (!actionName) {
+          setIsRunning(false)
+          return
+        }
+
+        console.log('Running action:', actionName)
+        await currentNode.runAction(actionName, context)
+      }
+
+      // Sync state back to React
+      if (context.currentImageIndex !== undefined) {
+        setCurrentImageIndex(context.currentImageIndex)
+      }
+      if (context.isSettingsConfigured) {
+        setIsSettingsConfigured(true)
+      }
+      if (context.isImageUploaded) {
+        setIsImageUploaded(true)
+      }
+      if (context.isPromptFilled) {
+        setIsPromptFilled(true)
+      }
+      if (context.isCreateClicked) {
+        // Reset all state after Create is clicked for next run
+        setCurrentImageIndex(0)
+        setIsSettingsConfigured(false)
+        setIsImageUploaded(false)
+        setIsPromptFilled(false)
+        setIsCreateClicked(false)
+      }
+
+    } catch (error) {
+      console.error('Workflow error:', error)
+      setValidationError(error instanceof Error ? error.message : 'เกิดข้อผิดพลาดในการทำงาน')
+    } finally {
+      setIsRunning(false)
     }
   }
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files) {
+      // Reset state when new images are uploaded
+      setCurrentImageIndex(0)
+      setIsSettingsConfigured(false)
+      setIsImageUploaded(false)
+      setIsPromptFilled(false)
+      setIsCreateClicked(false)
       Array.from(files).forEach(file => {
         const reader = new FileReader()
         reader.onload = (event) => {
@@ -72,8 +235,12 @@ function ImageTab() {
 
   const handleMultiSetChange = (mode: 'none' | 'multi' | 'sameModel') => {
     setMultiSetMode(mode)
-    if (mode !== 'none') {
-      generateSets(setCount, mode === 'sameModel')
+    if (mode === 'multi') {
+      generateSets(setCount, false)
+    } else if (mode === 'sameModel') {
+      // Clear sets - will be auto-created from uploads
+      setImageSets([])
+      setSharedModelImage(null)
     } else {
       setImageSets([])
     }
@@ -106,33 +273,180 @@ function ImageTab() {
       {/* Multi-set area */}
       {multiSetMode !== 'none' && (
         <div className="bg-base-300 rounded-lg p-2 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm">📦 จำนวนชุด:</span>
-            <select
-              className="select select-bordered select-xs"
-              value={setCount}
-              onChange={(e) => {
-                const count = parseInt(e.target.value)
-                setSetCount(count)
-                generateSets(count, multiSetMode === 'sameModel')
-              }}
-            >
-              {[2,3,4,5,6,7,8,9,10].map(n => (
-                <option key={n} value={n}>{n} ชุด</option>
-              ))}
-            </select>
-          </div>
+          {/* Set count selector - Only for multi mode */}
+          {multiSetMode === 'multi' && (
+            <div className="flex items-center justify-between">
+              <span className="text-sm">📦 จำนวนชุด:</span>
+              <select
+                className="select select-bordered select-xs"
+                value={setCount}
+                onChange={(e) => {
+                  const count = parseInt(e.target.value)
+                  setSetCount(count)
+                  generateSets(count, false)
+                }}
+              >
+                {[2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                  <option key={n} value={n}>{n} ชุด</option>
+                ))}
+              </select>
+            </div>
+          )}
 
+          {/* Bulk Upload Input for sameModel mode */}
+          {multiSetMode === 'sameModel' && (
+            <input
+              id="bulkUploadInput"
+              type="file"
+              accept=".png,.jpg,.jpeg,.webp"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = e.target.files
+                if (!files || files.length === 0) return
+
+                const startIndex = parseInt(e.target.dataset.startIndex || '-1')
+                const fileArray = Array.from(files)
+
+                // Read all files
+                const readPromises = fileArray.map(file => {
+                  return new Promise<string>((resolve) => {
+                    const reader = new FileReader()
+                    reader.onload = (event) => resolve(event.target?.result as string)
+                    reader.readAsDataURL(file)
+                  })
+                })
+
+                Promise.all(readPromises).then((images) => {
+                  if (startIndex === -1) {
+                    // Clicked on model box: first image = model, rest = products
+                    if (images.length > 0) {
+                      setSharedModelImage(images[0])
+                    }
+                    if (images.length > 1) {
+                      const productImages = images.slice(1)
+                      const productCount = productImages.length
+                      // Auto-create sets based on product count
+                      const newSets: ImageSet[] = []
+                      for (let i = 0; i < productCount; i++) {
+                        newSets.push({
+                          id: `${Date.now()}-${i}`,
+                          product: productImages[i],
+                          model: null,
+                          name: ''
+                        })
+                      }
+                      setSetCount(productCount)
+                      setImageSets(newSets)
+                    }
+                  } else {
+                    // Clicked on product box: all images = products starting from startIndex
+                    // Also expand sets if needed
+                    const totalNeeded = startIndex + images.length
+                    setImageSets(prev => {
+                      let newSets = [...prev]
+                      // Expand if needed
+                      while (newSets.length < totalNeeded) {
+                        newSets.push({
+                          id: `${Date.now()}-${newSets.length}`,
+                          product: null,
+                          model: null,
+                          name: ''
+                        })
+                      }
+                      // Assign images
+                      return newSets.map((set, i) => {
+                        const imageIndex = i - startIndex
+                        if (imageIndex >= 0 && imageIndex < images.length) {
+                          return { ...set, product: images[imageIndex] }
+                        }
+                        return set
+                      })
+                    })
+                    setSetCount(Math.max(setCount, totalNeeded))
+                  }
+                })
+
+                // Reset input
+                e.target.value = ''
+              }}
+            />
+          )}
+
+          {/* Model Row - Only for sameModel mode */}
+          {multiSetMode === 'sameModel' && (
+            <div className="flex justify-center py-2">
+              {sharedModelImage ? (
+                <div className="relative">
+                  <img src={sharedModelImage} alt="Model" className="w-20 h-20 object-cover rounded-lg" />
+                  <button
+                    className="btn btn-circle btn-xs btn-error absolute -top-1 -right-1"
+                    onClick={() => setSharedModelImage(null)}
+                  >
+                    ✕
+                  </button>
+                  <div className="text-xs text-center mt-1 text-secondary font-medium">👤 นางแบบ</div>
+                </div>
+              ) : (
+                <div
+                  className="w-20 h-20 border-2 border-dashed border-secondary rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-secondary/80 hover:bg-secondary/10 transition-colors"
+                  onClick={() => {
+                    const input = document.getElementById('bulkUploadInput') as HTMLInputElement
+                    if (input) {
+                      input.dataset.startIndex = '-1'
+                      input.click()
+                    }
+                  }}
+                >
+                  <span className="text-xl">👤</span>
+                  <span className="text-xs">นางแบบ</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Product Grid */}
+          {multiSetMode === 'sameModel' && imageSets.length === 0 && (
+            <div className="text-center text-xs text-base-content/50 py-2">
+              👆 คลิกที่นางแบบเพื่ออัปโหลดรูป (รูปแรก = นางแบบ, รูปถัดไป = สินค้า)
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto">
             {imageSets.map((set, index) => (
               <div key={set.id} className="bg-base-200 rounded-lg p-2">
                 <div className="text-xs font-bold text-primary mb-2">📦 ชุดที่ {index + 1}</div>
                 <div className="flex gap-1 mb-2">
-                  <div className="flex-1 h-16 border-2 border-dashed border-primary/30 rounded flex flex-col items-center justify-center text-xs cursor-pointer hover:border-primary/60">
-                    <span>📷</span>
-                    <span>รูปสินค้า</span>
-                  </div>
-                  {(multiSetMode === 'multi' || index === 0) && (
+                  {/* Product Image */}
+                  {set.product ? (
+                    <div className={`${multiSetMode === 'sameModel' ? 'w-full' : 'flex-1'} h-16 relative`}>
+                      <img src={set.product} alt="" className="w-full h-full object-cover rounded" />
+                      <button
+                        className="btn btn-circle btn-xs btn-error absolute -top-1 -right-1"
+                        onClick={() => {
+                          setImageSets(prev => prev.map((s, i) => i === index ? { ...s, product: null } : s))
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      className={`${multiSetMode === 'sameModel' ? 'w-full' : 'flex-1'} h-16 border-2 border-dashed border-primary/30 rounded flex flex-col items-center justify-center text-xs cursor-pointer hover:border-primary/60`}
+                      onClick={() => {
+                        if (multiSetMode === 'sameModel') {
+                          const input = document.getElementById('bulkUploadInput') as HTMLInputElement
+                          if (input) {
+                            input.dataset.startIndex = index.toString()
+                            input.click()
+                          }
+                        }
+                      }}
+                    >
+                      <span>📷</span>
+                      <span>รูปสินค้า</span>
+                    </div>
+                  )}
+                  {multiSetMode === 'multi' && (
                     <div className="flex-1 h-16 border-2 border-dashed border-secondary/30 rounded flex flex-col items-center justify-center text-xs cursor-pointer hover:border-secondary/60">
                       <span>👤</span>
                       <span>นางแบบ</span>
@@ -143,6 +457,10 @@ function ImageTab() {
                   type="text"
                   placeholder="ชื่อสินค้า"
                   className="input input-bordered input-xs w-full"
+                  value={set.name}
+                  onChange={(e) => {
+                    setImageSets(prev => prev.map((s, i) => i === index ? { ...s, name: e.target.value } : s))
+                  }}
                 />
               </div>
             ))}
@@ -352,11 +670,39 @@ function ImageTab() {
             <span className="text-xs opacity-50">(สูงสุด 50)</span>
           </div>
         )}
+
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+          <input
+            type="checkbox"
+            className="checkbox checkbox-success checkbox-xs"
+            checked={autoRunWorkflow}
+            onChange={(e) => setAutoRunWorkflow(e.target.checked)}
+          />
+          <span className="select-text">⚡ Auto Run Workflow (รันทั้งหมดอัตโนมัติ)</span>
+        </label>
       </div>
 
+      {/* Validation Error */}
+      {validationError && (
+        <div className="alert alert-error text-sm py-2">
+          <span>{validationError}</span>
+        </div>
+      )}
+
       {/* Create Button */}
-      <button className="btn btn-primary w-full" onClick={handleCreate}>
-        🖼️ สร้างรูปภาพ
+      <button
+        className="btn btn-primary w-full"
+        onClick={handleCreate}
+        disabled={isRunning}
+      >
+        {isRunning ? (
+          <>
+            <span className="loading loading-spinner loading-sm"></span>
+            กำลังสร้าง...
+          </>
+        ) : (
+          '🖼️ สร้างรูปภาพ'
+        )}
       </button>
     </div>
   )
