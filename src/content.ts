@@ -167,6 +167,193 @@ class WorkflowOverlay {
   }
 }
 
+// ==================== Flow Image Tracker ====================
+// Uses MutationObserver to track image UUIDs dynamically without scrolling
+
+class FlowImageTracker {
+  private orderedIds: string[] = [];
+  private observer: MutationObserver | null = null;
+  private isTracking: boolean = false;
+
+  // Extract UUID from image src URL
+  private extractUUID(src: string): string | null {
+    const match = src.match(/image\/([a-f0-9-]+)/);
+    return match ? match[1] : null;
+  }
+
+  // Update the ordered list based on current DOM state
+  private updateImageOrder() {
+    const images = document.querySelectorAll('img[alt^="Flow Image:"]');
+    const visibleIds: string[] = [];
+    const rawSrcs: string[] = [];
+
+    images.forEach((img) => {
+      const src = (img as HTMLImageElement).src;
+      rawSrcs.push(src.substring(0, 60));
+      const uuid = this.extractUUID(src);
+      if (uuid) {
+        visibleIds.push(uuid);
+      }
+    });
+
+    console.log('[FlowImageTracker] updateImageOrder triggered, images found:', images.length, 'with UUID:', visibleIds.length);
+    console.log('[FlowImageTracker] Raw src URLs:', rawSrcs);
+    console.log('[FlowImageTracker] Extracted UUIDs:', visibleIds);
+
+    // Merge visible IDs with existing order
+    this.mergeImageOrder(visibleIds);
+    console.log('[FlowImageTracker] Updated order, total tracked:', this.orderedIds.length, this.orderedIds);
+  }
+
+  // Merge newly visible IDs into the ordered list
+  private mergeImageOrder(visibleIds: string[]) {
+    const existingSet = new Set(this.orderedIds);
+    const newIds = visibleIds.filter(id => !existingSet.has(id));
+
+    if (newIds.length === 0 && visibleIds.length === 0) return;
+
+    // If we have new IDs, we need to insert them in correct position
+    if (newIds.length > 0) {
+      console.log('[FlowImageTracker] New images detected:', newIds);
+
+      // Build result maintaining DOM order for visible items
+      // and keeping track of items that scrolled out
+      const result: string[] = [];
+      const addedFromVisible = new Set<string>();
+
+      // Add visible IDs in their DOM order
+      for (const visibleId of visibleIds) {
+        result.push(visibleId);
+        addedFromVisible.add(visibleId);
+      }
+
+      // Append any existing IDs that are not currently visible (scrolled out)
+      for (const existingId of this.orderedIds) {
+        if (!addedFromVisible.has(existingId)) {
+          result.push(existingId);
+        }
+      }
+
+      this.orderedIds = result;
+    } else if (visibleIds.length > 0) {
+      // No new IDs, but update order based on visibility
+      // Keep existing order, just verify visible ones are tracked
+      const existingInOrder = new Set(this.orderedIds);
+      for (const id of visibleIds) {
+        if (!existingInOrder.has(id)) {
+          this.orderedIds.push(id);
+        }
+      }
+    }
+  }
+
+  // Start tracking images
+  start() {
+    if (this.isTracking) {
+      console.log('[FlowImageTracker] Already tracking');
+      return;
+    }
+
+    // Initial scan
+    this.updateImageOrder();
+
+    // Set up MutationObserver
+    const onMutation = (mutations: MutationRecord[]) => {
+      let hasRelevantChanges = false;
+
+      for (const mutation of mutations) {
+        // Check added nodes
+        mutation.addedNodes.forEach((node) => {
+          if (node instanceof HTMLElement) {
+            // Check if it's an image or contains images
+            if (node.matches && node.matches('img[alt^="Flow Image:"]')) {
+              hasRelevantChanges = true;
+            } else if (node.querySelectorAll) {
+              const imgs = node.querySelectorAll('img[alt^="Flow Image:"]');
+              if (imgs.length > 0) {
+                hasRelevantChanges = true;
+              }
+            }
+          }
+        });
+
+        // Check for attribute changes on images (src changes)
+        if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+          const target = mutation.target as HTMLElement;
+          if (target.matches && target.matches('img[alt^="Flow Image:"]')) {
+            hasRelevantChanges = true;
+          }
+        }
+      }
+
+      if (hasRelevantChanges) {
+        // Debounce updates
+        setTimeout(() => this.updateImageOrder(), 100);
+      }
+    };
+
+    this.observer = new MutationObserver(onMutation);
+
+    // Find the scroll container or use body
+    const container = document.querySelector('[class*="sc-c884da2c"]') || document.body;
+
+    this.observer.observe(container, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['src']
+    });
+
+    this.isTracking = true;
+    console.log('[FlowImageTracker] Started tracking');
+  }
+
+  // Stop tracking
+  stop() {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    this.isTracking = false;
+    console.log('[FlowImageTracker] Stopped tracking');
+  }
+
+  // Get current snapshot of ordered IDs
+  getSnapshot(): string[] {
+    // Update before returning to ensure we have latest visible images
+    this.updateImageOrder();
+    return [...this.orderedIds];
+  }
+
+  // Get new images compared to a previous snapshot
+  getNewImages(previousSnapshot: string[]): string[] {
+    const previousSet = new Set(previousSnapshot);
+    // Update to get any new images
+    this.updateImageOrder();
+    return this.orderedIds.filter(id => !previousSet.has(id));
+  }
+
+  // Get total count
+  getCount(): number {
+    this.updateImageOrder();
+    return this.orderedIds.length;
+  }
+
+  // Reset tracker
+  reset() {
+    this.orderedIds = [];
+    console.log('[FlowImageTracker] Reset');
+  }
+
+  // Check if tracking
+  isActive(): boolean {
+    return this.isTracking;
+  }
+}
+
+// Global instance
+const flowImageTracker = new FlowImageTracker();
+
 const overlay = new WorkflowOverlay();
 
 // Listen for messages from extension
@@ -1095,18 +1282,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
         }
 
+        // Count failed images (error message: "Couldn't generate image. Try again later.")
+        const allImageContainers = document.querySelectorAll('div[class*="sc-6349d8ef-5"]');
+        let errorCount = 0;
+        allImageContainers.forEach((container) => {
+          if (container.textContent?.includes("Couldn't generate image")) {
+            errorCount++;
+          }
+        });
+
         const hasPercentage = percentageCount > 0;
+        const hasError = errorCount > 0;
         const isLoading = hasPercentage;
         const isComplete = !isLoading;
 
-        console.log('[CHECK_GENERATION_STATUS] Status:', { hasPercentage, percentageCount, isLoading, isComplete });
+        console.log('[CHECK_GENERATION_STATUS] Status:', { hasPercentage, percentageCount, hasError, errorCount, isLoading, isComplete });
 
         sendResponse({
           success: true,
           complete: isComplete,
           isLoading,
           hasPercentage,
-          percentageCount
+          percentageCount,
+          hasError,
+          errorCount
         });
       } catch (e) {
         console.log('[CHECK_GENERATION_STATUS] Error:', e);
@@ -1116,12 +1315,74 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case 'GET_IMAGE_COUNT':
       try {
-        // Count all completed images (Flow Image: prefix in alt text)
-        const flowImages = document.querySelectorAll('img[alt^="Flow Image:"]');
-        console.log('[GET_IMAGE_COUNT] Found', flowImages.length, 'images');
-        sendResponse({ success: true, count: flowImages.length });
+        // If tracker is active, use tracked count (more accurate with lazy loading)
+        if (flowImageTracker.isActive()) {
+          const trackedCount = flowImageTracker.getCount();
+          console.log('[GET_IMAGE_COUNT] Using tracker, found', trackedCount, 'images');
+          sendResponse({ success: true, count: trackedCount, source: 'tracker' });
+        } else {
+          // Fallback: Count visible images (may be inaccurate with lazy loading)
+          const flowImages = document.querySelectorAll('img[alt^="Flow Image:"]');
+          console.log('[GET_IMAGE_COUNT] Found', flowImages.length, 'images (DOM only)');
+          sendResponse({ success: true, count: flowImages.length, source: 'dom' });
+        }
       } catch (e) {
         console.log('[GET_IMAGE_COUNT] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    // ==================== Flow Image Tracker Handlers ====================
+
+    case 'START_FLOW_IMAGE_TRACKER':
+      try {
+        flowImageTracker.start();
+        const initialSnapshot = flowImageTracker.getSnapshot();
+        console.log('[START_FLOW_IMAGE_TRACKER] Started, initial count:', initialSnapshot.length);
+        sendResponse({
+          success: true,
+          count: initialSnapshot.length,
+          snapshot: initialSnapshot
+        });
+      } catch (e) {
+        console.log('[START_FLOW_IMAGE_TRACKER] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'STOP_FLOW_IMAGE_TRACKER':
+      try {
+        flowImageTracker.stop();
+        console.log('[STOP_FLOW_IMAGE_TRACKER] Stopped');
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[STOP_FLOW_IMAGE_TRACKER] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'GET_FLOW_IMAGE_SNAPSHOT':
+      try {
+        const snapshot = flowImageTracker.getSnapshot();
+        console.log('[GET_FLOW_IMAGE_SNAPSHOT] Snapshot count:', snapshot.length);
+        sendResponse({
+          success: true,
+          snapshot: snapshot,
+          count: snapshot.length
+        });
+      } catch (e) {
+        console.log('[GET_FLOW_IMAGE_SNAPSHOT] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'RESET_FLOW_IMAGE_TRACKER':
+      try {
+        flowImageTracker.reset();
+        console.log('[RESET_FLOW_IMAGE_TRACKER] Tracker reset');
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[RESET_FLOW_IMAGE_TRACKER] Error:', e);
         sendResponse({ success: false, error: String(e) });
       }
       break;
@@ -1183,6 +1444,72 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ success: false, error: String(e) });
       }
       break;
+
+    case 'DOWNLOAD_IMAGES_BY_UUID':
+      (async () => {
+        try {
+          const uuids: string[] = message.uuids || [];
+          console.log('[DOWNLOAD_IMAGES_BY_UUID] Downloading images with UUIDs:', uuids);
+
+          if (uuids.length === 0) {
+            sendResponse({ success: true, downloaded: 0 });
+            return;
+          }
+
+          let downloadedCount = 0;
+
+          for (const uuid of uuids) {
+            // Find the image element with this UUID in its src
+            const img = document.querySelector(`img[src*="${uuid}"]`) as HTMLImageElement;
+
+            if (!img) {
+              console.log(`[DOWNLOAD_IMAGES_BY_UUID] Image not found for UUID: ${uuid}`);
+              continue;
+            }
+
+            // Go to grandparent container where buttons are located
+            // Structure: img -> parent (sc-6349d8ef-7) -> grandparent (sc-6349d8ef-5) which has buttons
+            const container = img.parentElement?.parentElement;
+
+            if (!container) {
+              console.log(`[DOWNLOAD_IMAGES_BY_UUID] Container not found for UUID: ${uuid}`);
+              continue;
+            }
+
+            const buttons = container.querySelectorAll('button');
+
+            // Find the download button (has 'Download' in textContent)
+            let downloadBtn: HTMLButtonElement | null = null;
+            for (let i = 0; i < buttons.length; i++) {
+              const text = buttons[i].textContent || '';
+              if (text.includes('Download')) {
+                downloadBtn = buttons[i] as HTMLButtonElement;
+                break;
+              }
+            }
+
+            if (!downloadBtn) {
+              console.log(`[DOWNLOAD_IMAGES_BY_UUID] Download button not found for UUID: ${uuid}`);
+              continue;
+            }
+
+            // Click download button - downloads directly without menu
+            downloadBtn.click();
+            downloadedCount++;
+            console.log(`[DOWNLOAD_IMAGES_BY_UUID] Clicked download button for UUID: ${uuid}`);
+
+            // Wait between downloads to avoid issues
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+
+          console.log('[DOWNLOAD_IMAGES_BY_UUID] Successfully downloaded', downloadedCount, 'images');
+          sendResponse({ success: true, downloaded: downloadedCount });
+        } catch (e) {
+          console.log('[DOWNLOAD_IMAGES_BY_UUID] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true; // Keep message channel open for async response
 
     // ==================== TikTok Handlers ====================
 

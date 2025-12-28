@@ -52,12 +52,17 @@ export interface ImageFlowContext {
   autoSaveImage?: boolean;
   // Track image count before generation (to know how many new images were created)
   imageCountBeforeGeneration?: number;
+  // Track image UUIDs before generation (more accurate with lazy loading)
+  snapshotBeforeGeneration?: string[];
   // Multi-set mode support (sameModel mode)
   multiSetMode?: 'none' | 'multi' | 'sameModel';
   currentSetIndex?: number;
   totalSets?: number;
   sharedModelImage?: string | null;
   productImages?: string[];  // Array of product images for each set
+  // Retry tracking for failed generation
+  retryCount?: number;
+  lastGenerationErrorCount?: number;
 }
 
 // Generate prompt based on style and context
@@ -184,6 +189,12 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
         });
         // Wait for navigation
         await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Start the image tracker for accurate counting with lazy loading
+        await chrome.tabs.sendMessage(ctx.tabId, {
+          type: 'START_FLOW_IMAGE_TRACKER'
+        });
+        console.log('[ensureImageTabAndClickNewProject] Started image tracker');
       }
     }, 'projectEditor');
 
@@ -351,12 +362,13 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
     // Act action: click Create button and wait for generation to complete
     .addAction('clickCreate', async (ctx) => {
       if (ctx.tabId) {
-        // Save current image count before generation (for auto-download later)
-        const countResponse = await chrome.tabs.sendMessage(ctx.tabId, {
-          type: 'GET_IMAGE_COUNT'
+        // Save current image snapshot before generation (for auto-download later)
+        const snapshotResponse = await chrome.tabs.sendMessage(ctx.tabId, {
+          type: 'GET_FLOW_IMAGE_SNAPSHOT'
         });
-        ctx.imageCountBeforeGeneration = countResponse?.count || 0;
-        console.log('[clickCreate] Image count before generation:', ctx.imageCountBeforeGeneration);
+        ctx.snapshotBeforeGeneration = snapshotResponse?.snapshot || [];
+        ctx.imageCountBeforeGeneration = snapshotResponse?.count || 0;
+        console.log('[clickCreate] Image snapshot before generation:', ctx.snapshotBeforeGeneration?.length, 'images', ctx.snapshotBeforeGeneration);
 
         // Click the Create button
         await chrome.tabs.sendMessage(ctx.tabId, {
@@ -438,35 +450,36 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
         return 'configureSettings';
       }
 
-      // Step 3: Check if all images are uploaded using the new check action
+      // Step 3: If Create was already clicked, we're done - move to generating node
+      // This check must come BEFORE DOM checks to prevent infinite loop after generation
+      if (ctx.isCreateClicked) {
+        console.log(`[ActionResolver] Decision: null (Create already clicked, workflow complete)`);
+        return null; // Move to next node (handled by workflow)
+      }
+
+      // Step 4: Check if all images are uploaded using the new check action
       // This checks: no spinner in prompt box AND image count matches expected
       const allCropsConfirmed = (ctx.currentImageIndex ?? 0) >= ctx.images.length;
       console.log(`[ActionResolver] Before checkAllImagesUploaded: currentImageIndex=${ctx.currentImageIndex}, totalImages=${ctx.images.length}, allCropsConfirmed=${allCropsConfirmed}, isImageUploaded=${ctx.isImageUploaded}`);
       await node.runAction('checkAllImagesUploaded', ctx);
       console.log(`[ActionResolver] After checkAllImagesUploaded: isImageUploaded = ${ctx.isImageUploaded}`);
 
-      // Step 3b: If all crops confirmed but DOM not ready yet, wait and retry
+      // Step 4b: If all crops confirmed but DOM not ready yet, wait and retry
       if (allCropsConfirmed && !ctx.isImageUploaded) {
         console.log(`[ActionResolver] All crops confirmed but DOM not ready, waiting...`);
         return 'wait';
       }
 
-      // Step 4: If all images are uploaded, fill prompt
+      // Step 5: If all images are uploaded, fill prompt
       if (ctx.isImageUploaded && !ctx.isPromptFilled) {
         console.log(`[ActionResolver] Decision: fillPrompt`);
         return 'fillPrompt';
       }
 
-      // Step 5: If prompt is filled, click Create button
-      if (ctx.isImageUploaded && ctx.isPromptFilled && !ctx.isCreateClicked) {
+      // Step 6: If prompt is filled, click Create button
+      if (ctx.isImageUploaded && ctx.isPromptFilled) {
         console.log(`[ActionResolver] Decision: clickCreate`);
         return 'clickCreate';
-      }
-
-      // Step 6: If Create is clicked, we're done
-      if (ctx.isCreateClicked) {
-        console.log(`[ActionResolver] Decision: null (workflow complete)`);
-        return null; // Move to next node (handled by workflow)
       }
 
       // Step 7: Check if crop dialog is open (from previous upload)
@@ -529,12 +542,13 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
       if (ctx.tabId) {
         await overlay.showNodeName(ctx.tabId, 'projectEditorConfigured', ctx);
 
-        // Save current image count before generation (for auto-download later)
-        const countResponse = await chrome.tabs.sendMessage(ctx.tabId, {
-          type: 'GET_IMAGE_COUNT'
+        // Save current image snapshot before generation (for auto-download later)
+        const snapshotResponse = await chrome.tabs.sendMessage(ctx.tabId, {
+          type: 'GET_FLOW_IMAGE_SNAPSHOT'
         });
-        ctx.imageCountBeforeGeneration = countResponse?.count || 0;
-        console.log('[generate] Image count before generation:', ctx.imageCountBeforeGeneration);
+        ctx.snapshotBeforeGeneration = snapshotResponse?.snapshot || [];
+        ctx.imageCountBeforeGeneration = snapshotResponse?.count || 0;
+        console.log('[generate] Image snapshot before generation:', ctx.snapshotBeforeGeneration?.length, 'images', ctx.snapshotBeforeGeneration);
 
         await chrome.tabs.sendMessage(ctx.tabId, {
           type: 'GENERATE_IMAGES'
@@ -584,8 +598,12 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
               const completedBeforePolling = pollCount >= 3 && !hasPercentage && !generationStarted;
 
               if ((generationStarted && !hasPercentage) || completedBeforePolling) {
-                console.log(`[waitForResult] Generation complete after ${pollCount} polls (completedBeforePolling: ${completedBeforePolling})`);
-                resolve();
+                // Wait a bit for image src URLs to be updated with final UUIDs
+                console.log(`[waitForResult] Generation complete after ${pollCount} polls, waiting for images to load...`);
+                setTimeout(() => {
+                  console.log('[waitForResult] Done waiting, proceeding to completed node');
+                  resolve();
+                }, 1500);
               } else {
                 console.log(`[waitForResult] Still loading (started: ${generationStarted}, percentageCount: ${percentageCount}), next check in ${POLL_INTERVAL_MS / 1000}s...`);
                 setTimeout(checkComplete, POLL_INTERVAL_MS);
@@ -600,23 +618,47 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
   // Node: Completed
   const completedNode = new Node<ImageFlowContext>('completed', baseNode)
     .addAction('finish', async (ctx) => {
+      console.log('[finish] Starting finish action, autoSaveImage:', ctx.autoSaveImage);
       if (ctx.tabId) {
         await overlay.showNodeName(ctx.tabId, 'completed', ctx);
 
         // Auto-download new images if enabled
         if (ctx.autoSaveImage) {
           console.log('[finish] Auto-save enabled, downloading new images...');
-          console.log('[finish] Previous image count:', ctx.imageCountBeforeGeneration);
-          console.log('[finish] Expected new images:', ctx.imageCount);
+          console.log('[finish] Previous snapshot count:', ctx.snapshotBeforeGeneration?.length);
 
-          const downloadResponse = await chrome.tabs.sendMessage(ctx.tabId, {
-            type: 'DOWNLOAD_NEW_IMAGES',
-            previousCount: ctx.imageCountBeforeGeneration || 0,
-            newImageCount: ctx.imageCount || 4
+          // Get current snapshot and find new images by comparing UUIDs
+          const currentSnapshot = await chrome.tabs.sendMessage(ctx.tabId, {
+            type: 'GET_FLOW_IMAGE_SNAPSHOT'
           });
 
-          console.log('[finish] Download response:', downloadResponse);
+          console.log('[finish] Current snapshot count:', currentSnapshot?.snapshot?.length);
+
+          const beforeSet = new Set(ctx.snapshotBeforeGeneration || []);
+          const newImageUUIDs = (currentSnapshot?.snapshot || []).filter(
+            (uuid: string) => !beforeSet.has(uuid)
+          );
+
+          console.log('[finish] New images found:', newImageUUIDs.length, newImageUUIDs);
+          if (newImageUUIDs.length === 0 && currentSnapshot?.snapshot?.length > 0) {
+            console.log('[finish] DEBUG: First 3 before UUIDs:', ctx.snapshotBeforeGeneration?.slice(0, 3));
+            console.log('[finish] DEBUG: First 3 current UUIDs:', currentSnapshot?.snapshot?.slice(0, 3));
+          }
+
+          if (newImageUUIDs.length > 0) {
+            // Download each new image by clicking its download button
+            const downloadResponse = await chrome.tabs.sendMessage(ctx.tabId, {
+              type: 'DOWNLOAD_IMAGES_BY_UUID',
+              uuids: newImageUUIDs
+            });
+            console.log('[finish] Download response:', downloadResponse);
+          }
         }
+
+        // Stop the image tracker
+        await chrome.tabs.sendMessage(ctx.tabId, {
+          type: 'STOP_FLOW_IMAGE_TRACKER'
+        });
 
         await overlay.hide(ctx.tabId);
       }
@@ -626,11 +668,25 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
         // Auto-download current set's images if enabled
         if (ctx.autoSaveImage) {
           console.log(`[nextSet] Auto-save enabled for set ${ctx.currentSetIndex}, downloading...`);
-          await chrome.tabs.sendMessage(ctx.tabId, {
-            type: 'DOWNLOAD_NEW_IMAGES',
-            previousCount: ctx.imageCountBeforeGeneration || 0,
-            newImageCount: ctx.imageCount || 4
+
+          // Get current snapshot and find new images by comparing UUIDs
+          const currentSnapshot = await chrome.tabs.sendMessage(ctx.tabId, {
+            type: 'GET_FLOW_IMAGE_SNAPSHOT'
           });
+
+          const beforeSet = new Set(ctx.snapshotBeforeGeneration || []);
+          const newImageUUIDs = (currentSnapshot?.snapshot || []).filter(
+            (uuid: string) => !beforeSet.has(uuid)
+          );
+
+          console.log(`[nextSet] New images found:`, newImageUUIDs.length, newImageUUIDs);
+
+          if (newImageUUIDs.length > 0) {
+            await chrome.tabs.sendMessage(ctx.tabId, {
+              type: 'DOWNLOAD_IMAGES_BY_UUID',
+              uuids: newImageUUIDs
+            });
+          }
         }
 
         // Clear existing images from prompt box (stay on same project)
@@ -657,6 +713,7 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
         ctx.isPromptFilled = false;
         ctx.isCreateClicked = false;
         ctx.imageCountBeforeGeneration = undefined;
+        ctx.snapshotBeforeGeneration = undefined;
         // Keep isCreateImageModeSelected = true (already in create image mode)
         // Keep isSettingsConfigured = true (settings already set)
 
