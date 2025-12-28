@@ -17,7 +17,9 @@
     "https://labs.google.com/*",
     "https://aitestkitchen.withgoogle.com/*",
     "https://*.withgoogle.com/*",
-    "https://generativelanguage.googleapis.com/*"
+    "https://generativelanguage.googleapis.com/*",
+    "https://www.tiktok.com/*",
+    "https://tiktok.com/*"
   ],
   "action": {
     "default_title": "ShopEnginX"
@@ -32,6 +34,11 @@
   "content_scripts": [
     {
       "matches": ["https://labs.google/*"],
+      "js": ["src/content.ts"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.tiktok.com/*", "https://tiktok.com/*"],
       "js": ["src/content.ts"],
       "run_at": "document_idle"
     }

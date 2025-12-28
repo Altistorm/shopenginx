@@ -1184,6 +1184,301 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       break;
 
+    // ==================== TikTok Handlers ====================
+
+    case 'TIKTOK_CHECK_PAGE_READY':
+      try {
+        // Check if TikTok page is loaded by looking for user cards or search results
+        const hasUserCards = document.querySelector('[data-e2e="search-user-container"]') !== null ||
+                            document.querySelector('[class*="UserCard"]') !== null ||
+                            document.querySelector('[class*="user-card"]') !== null;
+        const hasSearchResults = document.querySelector('[data-e2e="search-common-link"]') !== null ||
+                                document.querySelectorAll('a[href*="/@"]').length > 0;
+        const ready = hasUserCards || hasSearchResults;
+        console.log('[TIKTOK_CHECK_PAGE_READY]', { hasUserCards, hasSearchResults, ready });
+        sendResponse({ success: true, ready });
+      } catch (e) {
+        console.log('[TIKTOK_CHECK_PAGE_READY] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_CLICK_USERS_TAB':
+      try {
+        console.log('[TIKTOK_CLICK_USERS_TAB] Looking for Users tab...');
+
+        // Method 1: Look for tab with "Users" text
+        const tabs = document.querySelectorAll('[role="tab"], [data-e2e*="tab"], a[href*="/user"], button');
+        let clicked = false;
+
+        for (const tab of tabs) {
+          const text = tab.textContent?.trim().toLowerCase() || '';
+          if (text === 'users' || text === 'accounts' || text.includes('users')) {
+            console.log('[TIKTOK_CLICK_USERS_TAB] Found Users tab:', text);
+            (tab as HTMLElement).click();
+            clicked = true;
+            break;
+          }
+        }
+
+        // Method 2: Look for link that leads to /search/user
+        if (!clicked) {
+          const userLinks = document.querySelectorAll('a[href*="/search/user"]');
+          if (userLinks.length > 0) {
+            console.log('[TIKTOK_CLICK_USERS_TAB] Found user search link');
+            (userLinks[0] as HTMLElement).click();
+            clicked = true;
+          }
+        }
+
+        // Method 3: Look for specific TikTok tab element
+        if (!clicked) {
+          const allElements = document.querySelectorAll('*');
+          for (const el of allElements) {
+            if (el.getAttribute('data-e2e')?.includes('user') &&
+                (el.tagName === 'A' || el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab')) {
+              console.log('[TIKTOK_CLICK_USERS_TAB] Found element with user data-e2e');
+              (el as HTMLElement).click();
+              clicked = true;
+              break;
+            }
+          }
+        }
+
+        sendResponse({ success: clicked, error: clicked ? undefined : 'Users tab not found' });
+      } catch (e) {
+        console.log('[TIKTOK_CLICK_USERS_TAB] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_GET_PROFILES':
+      try {
+        console.log('[TIKTOK_GET_PROFILES] Scanning for user profiles...');
+
+        const profiles: Array<{
+          id: string;
+          name: string;
+          username: string;
+          followerText: string;
+          isFollowing: boolean;
+          index: number;
+        }> = [];
+
+        // Find user cards - TikTok search uses DivSearchUserItemContainer
+        const userContainers = document.querySelectorAll('[class*="DivSearchUserItemContainer"]');
+
+        console.log('[TIKTOK_GET_PROFILES] Found', userContainers.length, 'user cards');
+
+        userContainers.forEach((container, index) => {
+          try {
+            // Parse text content - format: "displayName\n\nusername\n\nXXX\n\nFollowers..."
+            const textContent = (container as HTMLElement).innerText || '';
+            const parts = textContent.split('\n').filter(t => t.trim());
+
+            // parts[0] = display name, parts[1] = username, parts[2] = follower count
+            const name = parts[0] || '';
+            const username = parts[1] || '';
+            const followerText = parts[2] || '0';
+
+            // Get button and check its state
+            const btn = container.querySelector('button');
+            const btnText = btn?.textContent?.trim().toLowerCase() || '';
+
+            // "follow" = not following, "following"/"friends" = already following
+            const isFollowing = btnText === 'following' || btnText === 'friends' || btnText === 'requested';
+            const hasFollowButton = btnText === 'follow' || isFollowing;
+
+            console.log('[TIKTOK_GET_PROFILES] Card', index, ':', { name, username, followerText, btnText, isFollowing });
+
+            if (hasFollowButton && username) {
+              profiles.push({
+                id: `profile_${index}_${username}`,
+                name,
+                username,
+                followerText,
+                isFollowing,
+                index
+              });
+            }
+          } catch (err) {
+            console.warn('[TIKTOK_GET_PROFILES] Error parsing profile:', err);
+          }
+        });
+
+        console.log('[TIKTOK_GET_PROFILES] Parsed', profiles.length, 'profiles');
+        sendResponse({ success: true, profiles });
+      } catch (e) {
+        console.log('[TIKTOK_GET_PROFILES] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_CLICK_FOLLOW':
+      try {
+        const profileId: string = message.profileId || '';
+        const profileIndex = parseInt(profileId.split('_')[1] || '0');
+
+        console.log('[TIKTOK_CLICK_FOLLOW] Looking for follow button at index:', profileIndex);
+
+        // Find user containers - same selector as GET_PROFILES
+        const containers = document.querySelectorAll('[class*="DivSearchUserItemContainer"]');
+
+        console.log('[TIKTOK_CLICK_FOLLOW] Total containers found:', containers.length);
+
+        if (profileIndex >= containers.length) {
+          sendResponse({ success: false, error: `Profile index ${profileIndex} >= containers ${containers.length}` });
+          return;
+        }
+
+        const container = containers[profileIndex];
+        const btn = container.querySelector('button');
+        const btnText = btn?.textContent?.trim().toLowerCase() || '';
+
+        console.log('[TIKTOK_CLICK_FOLLOW] Button text:', btnText);
+
+        // Only click if it says "follow" (not "following")
+        if (btn && btnText === 'follow') {
+          console.log('[TIKTOK_CLICK_FOLLOW] Clicking follow button');
+          (btn as HTMLElement).click();
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: `Button text is "${btnText}", not "follow"` });
+        }
+      } catch (e) {
+        console.log('[TIKTOK_CLICK_FOLLOW] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_START_RATE_LIMIT_OBSERVER':
+      try {
+        // Reset state
+        (window as any).__tiktokRateLimited = false;
+        (window as any).__tiktokRateLimitMessage = '';
+
+        // Disconnect existing observer if any
+        if ((window as any).__tiktokRateLimitObserver) {
+          (window as any).__tiktokRateLimitObserver.disconnect();
+        }
+
+        // Rate limit detection callback (shared logic)
+        const onMutation = (mutations: MutationRecord[]) => {
+          mutations.forEach(m => {
+            m.addedNodes.forEach(node => {
+              if (node.nodeType === 1) {
+                const text = ((node as HTMLElement).innerText || '').toLowerCase();
+                // Check for rate limit messages (curly apostrophe \u2019 or regular)
+                if (text.includes("couldn\u2019t follow") ||
+                    text.includes("couldn't follow") ||
+                    text.includes('too many requests') ||
+                    text.includes('try again later')) {
+                  (window as any).__tiktokRateLimited = true;
+                  (window as any).__tiktokRateLimitMessage = text.substring(0, 100);
+                  console.log('[TIKTOK] Rate limit detected:', text);
+                }
+              }
+            });
+          });
+        };
+
+        // Option 1: Observe PREFIX_CLASS container (TikTok's toast container)
+        const prefixContainer = document.querySelector('[class*="PREFIX_CLASS"]');
+
+        // Option 2: Observe document.body (fallback, catches everything)
+        // const observeTarget = document.body;
+
+        const observeTarget = prefixContainer || document.body;
+
+        if (!observeTarget) {
+          console.log('[TIKTOK_START_RATE_LIMIT_OBSERVER] No observe target found');
+          sendResponse({ success: false, error: 'Observe target not found' });
+          return;
+        }
+
+        const rateLimitObserver = new MutationObserver(onMutation);
+        rateLimitObserver.observe(observeTarget, { childList: true, subtree: true });
+        (window as any).__tiktokRateLimitObserver = rateLimitObserver;
+
+        console.log('[TIKTOK_START_RATE_LIMIT_OBSERVER] Observer started on:', observeTarget === document.body ? 'document.body' : 'PREFIX_CLASS');
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[TIKTOK_START_RATE_LIMIT_OBSERVER] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_STOP_RATE_LIMIT_OBSERVER':
+      try {
+        if ((window as any).__tiktokRateLimitObserver) {
+          (window as any).__tiktokRateLimitObserver.disconnect();
+          (window as any).__tiktokRateLimitObserver = null;
+        }
+        (window as any).__tiktokRateLimited = false;
+        (window as any).__tiktokRateLimitMessage = '';
+        console.log('[TIKTOK_STOP_RATE_LIMIT_OBSERVER] Observer stopped');
+        sendResponse({ success: true });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_CHECK_RATE_LIMIT':
+      try {
+        // Check if the observer detected a rate limit
+        const rateLimited = (window as any).__tiktokRateLimited || false;
+        const matchedPhrase = (window as any).__tiktokRateLimitMessage || '';
+
+        console.log('[TIKTOK_CHECK_RATE_LIMIT] Observer state:', { rateLimited, matchedPhrase });
+        sendResponse({ success: true, rateLimited, matchedPhrase });
+      } catch (e) {
+        console.log('[TIKTOK_CHECK_RATE_LIMIT] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_SCROLL_FOR_MORE':
+      try {
+        console.log('[TIKTOK_SCROLL_FOR_MORE] Scrolling to load more profiles...');
+
+        // TikTok uses MAIN element with SearchGridLayoutContainer as scrollable container
+        const mainContainer = document.querySelector('main[class*="SearchGridLayoutContainer"]');
+
+        if (mainContainer) {
+          console.log('[TIKTOK_SCROLL_FOR_MORE] Found main container, scrolling...');
+          mainContainer.scrollBy({
+            top: 800,
+            behavior: 'smooth'
+          });
+        } else {
+          // Fallback to window scroll
+          console.log('[TIKTOK_SCROLL_FOR_MORE] Using window scroll fallback');
+          window.scrollBy({
+            top: 800,
+            behavior: 'smooth'
+          });
+        }
+
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[TIKTOK_SCROLL_FOR_MORE] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_UPDATE_RATE_LIMIT_PHRASES':
+      try {
+        // Store custom rate limit phrases for checking
+        const phrases: string[] = message.phrases || [];
+        (window as any).__tiktokRateLimitPhrases = phrases;
+        console.log('[TIKTOK_UPDATE_RATE_LIMIT_PHRASES] Updated phrases:', phrases);
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[TIKTOK_UPDATE_RATE_LIMIT_PHRASES] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
     default:
       sendResponse({ success: false, error: 'Unknown message type' });
   }

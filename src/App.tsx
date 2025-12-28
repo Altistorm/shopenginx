@@ -3,8 +3,9 @@ import VideoTab from './tabs/VideoTab'
 import ImageTab from './tabs/ImageTab'
 import AutoTab from './tabs/AutoTab'
 import FolderTab from './tabs/FolderTab'
+import FollowerTab from './tabs/FollowerTab'
 
-type TabType = 'video' | 'image' | 'auto' | 'folder'
+type TabType = 'video' | 'image' | 'auto' | 'folder' | 'follower'
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>('video')
@@ -14,6 +15,7 @@ function App() {
     { id: 'image' as TabType, label: 'Image', icon: '🖼️' },
     { id: 'auto' as TabType, label: 'Auto', icon: '🚀' },
     { id: 'folder' as TabType, label: 'Folder', icon: '📁' },
+    { id: 'follower' as TabType, label: 'Follower', icon: '👥' },
   ]
 
   return (
@@ -46,6 +48,7 @@ function App() {
         {activeTab === 'image' && <ImageTab />}
         {activeTab === 'auto' && <AutoTab />}
         {activeTab === 'folder' && <FolderTab />}
+        {activeTab === 'follower' && <FollowerTab />}
       </div>
     </div>
   )
