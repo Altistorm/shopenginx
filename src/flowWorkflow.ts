@@ -52,6 +52,12 @@ export interface ImageFlowContext {
   autoSaveImage?: boolean;
   // Track image count before generation (to know how many new images were created)
   imageCountBeforeGeneration?: number;
+  // Multi-set mode support (sameModel mode)
+  multiSetMode?: 'none' | 'multi' | 'sameModel';
+  currentSetIndex?: number;
+  totalSets?: number;
+  sharedModelImage?: string | null;
+  productImages?: string[];  // Array of product images for each set
 }
 
 // Generate prompt based on style and context
@@ -289,6 +295,12 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
       }
     }, 'projectEditor')
 
+    // Wait action: pause and retry on next iteration
+    .addAction('wait', async () => {
+      console.log('[wait] Waiting 2s before next iteration...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }, 'projectEditor')
+
     // Act action: confirm crop dialog
     .addAction('confirmCrop', async (ctx) => {
       if (ctx.tabId) {
@@ -352,68 +364,12 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
         });
 
         ctx.isCreateClicked = true;
-        console.log('[clickCreate] Create button clicked, waiting for generation to start...');
+        console.log('[clickCreate] Create button clicked, transitioning to generating node...');
 
         // Wait 3 seconds for generation to start (loading percentage to appear)
         await new Promise(resolve => setTimeout(resolve, 3000));
-
-        // Wait for generation to complete (poll every 10 seconds)
-        const POLL_INTERVAL_MS = 10000; // 10 seconds
-        const expectedNewImages = ctx.imageCount || 4;
-        let pollCount = 0;
-
-        await new Promise<void>((resolve) => {
-          const checkComplete = () => {
-            if (ctx.tabId) {
-              pollCount++;
-              console.log(`[clickCreate] Checking generation status (poll #${pollCount})...`);
-
-              // Check both: no loading percentage AND new images created
-              chrome.tabs.sendMessage(ctx.tabId, { type: 'CHECK_GENERATION_STATUS' }, (statusResponse) => {
-                console.log(`[clickCreate] Status response:`, statusResponse);
-
-                chrome.tabs.sendMessage(ctx.tabId!, { type: 'GET_IMAGE_COUNT' }, (countResp) => {
-                  const currentCount = countResp?.count || 0;
-                  const newImagesCreated = currentCount - (ctx.imageCountBeforeGeneration || 0);
-
-                  console.log(`[clickCreate] Current image count: ${currentCount}, new images: ${newImagesCreated}/${expectedNewImages}`);
-
-                  // Complete when: no loading percentage AND expected new images are created
-                  const noLoadingIndicator = !statusResponse?.hasPercentage;
-                  const hasNewImages = newImagesCreated >= expectedNewImages;
-
-                  if (noLoadingIndicator && hasNewImages) {
-                    console.log(`[clickCreate] Generation complete after ${pollCount} polls (${newImagesCreated} new images)`);
-                    resolve();
-                  } else {
-                    console.log(`[clickCreate] Still loading (hasPercentage: ${statusResponse?.hasPercentage}, newImages: ${newImagesCreated}), next check in ${POLL_INTERVAL_MS / 1000}s...`);
-                    setTimeout(checkComplete, POLL_INTERVAL_MS);
-                  }
-                });
-              });
-            }
-          };
-          checkComplete();
-        });
-
-        // Auto-download new images if enabled
-        if (ctx.autoSaveImage) {
-          console.log('[clickCreate] Auto-save enabled, downloading new images...');
-          console.log('[clickCreate] Previous image count:', ctx.imageCountBeforeGeneration);
-          console.log('[clickCreate] Expected new images:', ctx.imageCount);
-
-          const downloadResponse = await chrome.tabs.sendMessage(ctx.tabId, {
-            type: 'DOWNLOAD_NEW_IMAGES',
-            previousCount: ctx.imageCountBeforeGeneration || 0,
-            newImageCount: ctx.imageCount || 4
-          });
-
-          console.log('[clickCreate] Download response:', downloadResponse);
-        }
-
-        console.log('[clickCreate] Generation workflow complete!');
       }
-    }, 'projectEditor')
+    }, 'generating')
 
     // Act action: configure settings (aspect ratio + output count)
     .addAction('configureSettings', async (ctx) => {
@@ -459,7 +415,11 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
         isCreateClicked: ctx.isCreateClicked,
         isCreateImageModeSelected: ctx.isCreateImageModeSelected,
         isImagePickerOpen: ctx.isImagePickerOpen,
-        isCropDialogOpen: ctx.isCropDialogOpen
+        isCropDialogOpen: ctx.isCropDialogOpen,
+        // Multi-set info
+        multiSetMode: ctx.multiSetMode,
+        currentSetIndex: ctx.currentSetIndex,
+        totalSets: ctx.totalSets
       });
 
       // First, show the overlay
@@ -480,8 +440,16 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
 
       // Step 3: Check if all images are uploaded using the new check action
       // This checks: no spinner in prompt box AND image count matches expected
+      const allCropsConfirmed = (ctx.currentImageIndex ?? 0) >= ctx.images.length;
+      console.log(`[ActionResolver] Before checkAllImagesUploaded: currentImageIndex=${ctx.currentImageIndex}, totalImages=${ctx.images.length}, allCropsConfirmed=${allCropsConfirmed}, isImageUploaded=${ctx.isImageUploaded}`);
       await node.runAction('checkAllImagesUploaded', ctx);
       console.log(`[ActionResolver] After checkAllImagesUploaded: isImageUploaded = ${ctx.isImageUploaded}`);
+
+      // Step 3b: If all crops confirmed but DOM not ready yet, wait and retry
+      if (allCropsConfirmed && !ctx.isImageUploaded) {
+        console.log(`[ActionResolver] All crops confirmed but DOM not ready, waiting...`);
+        return 'wait';
+      }
 
       // Step 4: If all images are uploaded, fill prompt
       if (ctx.isImageUploaded && !ctx.isPromptFilled) {
@@ -581,23 +549,45 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
       if (ctx.tabId) {
         await overlay.showNodeName(ctx.tabId, 'generating', ctx);
       }
-      await new Promise<void>((resolve) => {
-        const POLL_INTERVAL_MS = 10000; // 10 seconds
-        let pollCount = 0;
 
+      const POLL_INTERVAL_MS = 10000; // 10 seconds
+      const expectedImages = ctx.imageCount || 4;
+      let pollCount = 0;
+      let generationStarted = false;
+
+      await new Promise<void>((resolve) => {
         const checkComplete = () => {
           if (ctx.tabId) {
             pollCount++;
             console.log(`[waitForResult] Checking generation status (poll #${pollCount})...`);
 
-            chrome.tabs.sendMessage(ctx.tabId, { type: 'CHECK_GENERATION_STATUS' }, (response) => {
-              console.log(`[waitForResult] Response:`, response);
+            chrome.tabs.sendMessage(ctx.tabId, { type: 'CHECK_GENERATION_STATUS' }, (statusResponse) => {
+              const percentageCount = statusResponse?.percentageCount || 0;
+              const hasPercentage = statusResponse?.hasPercentage || false;
 
-              if (response?.complete) {
-                console.log(`[waitForResult] Generation complete after ${pollCount} polls`);
+              console.log(`[waitForResult] Status: percentageCount=${percentageCount}, expected=${expectedImages}, hasPercentage=${hasPercentage}`);
+
+              // Track if generation started (saw expected number of percentage indicators)
+              if (percentageCount >= expectedImages) {
+                generationStarted = true;
+                console.log(`[waitForResult] Generation started with ${percentageCount} images`);
+              }
+
+              // Also mark as started if we see ANY percentage (partial start)
+              if (percentageCount > 0 && !generationStarted) {
+                generationStarted = true;
+                console.log(`[waitForResult] Generation started (partial: ${percentageCount}/${expectedImages})`);
+              }
+
+              // Complete when: generation started AND no more percentage indicators
+              // OR: after 3+ polls with no percentage (generation completed before we started polling)
+              const completedBeforePolling = pollCount >= 3 && !hasPercentage && !generationStarted;
+
+              if ((generationStarted && !hasPercentage) || completedBeforePolling) {
+                console.log(`[waitForResult] Generation complete after ${pollCount} polls (completedBeforePolling: ${completedBeforePolling})`);
                 resolve();
               } else {
-                console.log(`[waitForResult] Still loading, next check in ${POLL_INTERVAL_MS / 1000}s...`);
+                console.log(`[waitForResult] Still loading (started: ${generationStarted}, percentageCount: ${percentageCount}), next check in ${POLL_INTERVAL_MS / 1000}s...`);
                 setTimeout(checkComplete, POLL_INTERVAL_MS);
               }
             });
@@ -630,7 +620,66 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
 
         await overlay.hide(ctx.tabId);
       }
-    }, null);
+    }, null)
+    .addAction('nextSet', async (ctx) => {
+      if (ctx.tabId) {
+        // Auto-download current set's images if enabled
+        if (ctx.autoSaveImage) {
+          console.log(`[nextSet] Auto-save enabled for set ${ctx.currentSetIndex}, downloading...`);
+          await chrome.tabs.sendMessage(ctx.tabId, {
+            type: 'DOWNLOAD_NEW_IMAGES',
+            previousCount: ctx.imageCountBeforeGeneration || 0,
+            newImageCount: ctx.imageCount || 4
+          });
+        }
+
+        // Clear existing images from prompt box (stay on same project)
+        console.log(`[nextSet] Clearing prompt box images...`);
+        await chrome.tabs.sendMessage(ctx.tabId, {
+          type: 'CLEAR_PROMPT_BOX_IMAGES'
+        });
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Increment to next set
+        const nextIndex = (ctx.currentSetIndex ?? 0) + 1;
+        ctx.currentSetIndex = nextIndex;
+
+        // Update images for next set: [sharedModel, product[nextIndex]]
+        if (ctx.sharedModelImage && ctx.productImages && ctx.productImages[nextIndex]) {
+          ctx.images = [ctx.sharedModelImage, ctx.productImages[nextIndex]];
+        }
+
+        // Reset state for next iteration (keep settings configured)
+        ctx.currentImageIndex = 0;
+        ctx.isImagePickerOpen = false;
+        ctx.isCropDialogOpen = false;
+        ctx.isImageUploaded = false;
+        ctx.isPromptFilled = false;
+        ctx.isCreateClicked = false;
+        ctx.imageCountBeforeGeneration = undefined;
+        // Keep isCreateImageModeSelected = true (already in create image mode)
+        // Keep isSettingsConfigured = true (settings already set)
+
+        console.log(`[nextSet] Moving to set ${nextIndex}/${ctx.totalSets}, images: ${ctx.images.length}`);
+        await overlay.showNodeName(ctx.tabId, 'nextSet', ctx);
+      }
+    }, 'projectEditor')
+    .setActionResolver(async (ctx) => {
+      // Check if we're in sameModel mode and have more sets to process
+      if (ctx.multiSetMode === 'sameModel' && ctx.totalSets) {
+        const currentIndex = ctx.currentSetIndex ?? 0;
+        const hasMoreSets = currentIndex + 1 < ctx.totalSets;
+
+        console.log(`[completed ActionResolver] sameModel mode: set ${currentIndex + 1}/${ctx.totalSets}, hasMoreSets: ${hasMoreSets}`);
+
+        if (hasMoreSets) {
+          return 'nextSet';
+        }
+      }
+
+      // No more sets or not in sameModel mode - finish
+      return 'finish';
+    });
 
   return new Workflow<ImageFlowContext>()
     .setNodeDetector(imageWorkflowNodeDetector)

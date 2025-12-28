@@ -240,6 +240,16 @@ export class WorkflowManager {
   isAnyRunning(): boolean {
     return this.activeRunners.size > 0;
   }
+
+  // Get a specific node by ID from a workflow
+  getNodeById<TContext>(workflowName: string, nodeId: string): Node<TContext> | undefined {
+    const factory = this.workflows.get(workflowName);
+    if (!factory) {
+      return undefined;
+    }
+    const workflow = factory();
+    return workflow.getNode(nodeId);
+  }
 }
 
 export const workflowManager = new WorkflowManager();

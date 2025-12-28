@@ -357,15 +357,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         // Find and click the Create button (has arrow_forward icon)
         const buttons = document.querySelectorAll('button');
+        console.log('[CLICK_CREATE] Total buttons on page:', buttons.length);
+
+        // Log all buttons that contain "Create" or "arrow_forward"
+        console.log('[CLICK_CREATE] Buttons containing "Create" or "arrow_forward":');
+        for (const btn of buttons) {
+          const text = btn.textContent || '';
+          if (text.includes('Create') || text.includes('arrow_forward')) {
+            const rect = btn.getBoundingClientRect();
+            console.log('[CLICK_CREATE] Button:', {
+              text: text.replace(/\s+/g, ' ').substring(0, 80),
+              hasCreate: text.includes('Create'),
+              hasArrow: text.includes('arrow_forward'),
+              disabled: btn.hasAttribute('disabled'),
+              visible: rect.width > 0 && rect.height > 0,
+              position: { x: rect.x, y: rect.y, w: rect.width, h: rect.height }
+            });
+          }
+        }
+
+        // Check if image picker is open
+        const fileInput = document.querySelector('input[type="file"]');
+        console.log('[CLICK_CREATE] File input (picker) exists:', fileInput !== null);
+
+        // Check prompt box state
+        const promptArea = document.querySelector('[role="presentation"]');
+        if (promptArea) {
+          const ingredientBtns = promptArea.querySelectorAll('button');
+          let imageCount = 0;
+          for (const btn of ingredientBtns) {
+            if (btn.textContent?.includes('This is your ingredient')) imageCount++;
+          }
+          console.log('[CLICK_CREATE] Images in prompt box:', imageCount);
+        }
+
+        // Find and click the Create button
         for (const btn of buttons) {
           if (btn.textContent?.includes('Create') && btn.textContent?.includes('arrow_forward') && !btn.hasAttribute('disabled')) {
+            console.log('[CLICK_CREATE] Clicking Create button now...');
             (btn as HTMLElement).click();
+            console.log('[CLICK_CREATE] Create button clicked!');
+
+            // Check state after click
+            setTimeout(() => {
+              const fileInputAfter = document.querySelector('input[type="file"]');
+              console.log('[CLICK_CREATE] After click - File input exists:', fileInputAfter !== null);
+            }, 500);
+
             sendResponse({ success: true });
             return;
           }
         }
+        console.log('[CLICK_CREATE] No matching Create button found!');
         sendResponse({ success: false, error: 'Create button not found or disabled' });
       } catch (e) {
+        console.log('[CLICK_CREATE] Error:', e);
         sendResponse({ success: false, error: String(e) });
       }
       break;
@@ -663,6 +709,56 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ success: false, error: String(e) });
       }
       break;
+
+    case 'CLEAR_PROMPT_BOX_IMAGES':
+      (async () => {
+        try {
+          console.log('[CLEAR_PROMPT_BOX_IMAGES] Clearing all images from prompt box...');
+
+          // Find all ingredient buttons (images in prompt box)
+          const ingredientButtons = document.querySelectorAll('button');
+          let removedCount = 0;
+
+          for (const btn of ingredientButtons) {
+            const text = btn.textContent || '';
+            if (text.includes('This is your ingredient')) {
+              // Find the close/remove button within or near this button
+              // Usually it's a button with "close" or "x" icon inside the parent container
+              const parent = btn.parentElement;
+              if (parent) {
+                const closeBtn = parent.querySelector('button[aria-label*="close"], button[aria-label*="remove"], button[aria-label*="delete"]') as HTMLButtonElement;
+                if (closeBtn) {
+                  closeBtn.click();
+                  removedCount++;
+                  await new Promise(resolve => setTimeout(resolve, 300));
+                } else {
+                  // Try finding a button with close icon (material icon)
+                  const allBtns = parent.querySelectorAll('button');
+                  for (const b of allBtns) {
+                    if (b !== btn && (b.textContent?.includes('close') || b.textContent?.includes('cancel'))) {
+                      (b as HTMLButtonElement).click();
+                      removedCount++;
+                      await new Promise(resolve => setTimeout(resolve, 300));
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          console.log(`[CLEAR_PROMPT_BOX_IMAGES] Removed ${removedCount} images`);
+
+          // Wait a bit for UI to update
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+          sendResponse({ success: true, removedCount });
+        } catch (e) {
+          console.log('[CLEAR_PROMPT_BOX_IMAGES] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true;
 
     case 'HANDLE_CROP_DIALOG':
       (async () => {
@@ -985,33 +1081,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'CHECK_GENERATION_STATUS':
       try {
         // Detection logic for Google Flow image generation status:
-        // ONLY check for percentage text (XX%) - this is the reliable loading indicator
+        // Count percentage text (XX%) - this is the reliable loading indicator
         // Note: Create button disabled state is NOT reliable because it stays disabled
         // when prompt is empty (which happens after generation completes)
 
-        // Check for percentage text (loading indicator)
-        let hasPercentage = false;
+        // Count percentage indicators (loading)
+        let percentageCount = 0;
         const textWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         while (textWalker.nextNode()) {
           const text = textWalker.currentNode.textContent?.trim() || '';
           if (/^\d{1,3}%$/.test(text)) {
-            hasPercentage = true;
-            console.log('[CHECK_GENERATION_STATUS] Found loading percentage:', text);
-            break;
+            percentageCount++;
           }
         }
 
-        // Generation is loading ONLY if percentage text exists
+        const hasPercentage = percentageCount > 0;
         const isLoading = hasPercentage;
         const isComplete = !isLoading;
 
-        console.log('[CHECK_GENERATION_STATUS] Status:', { hasPercentage, isLoading, isComplete });
+        console.log('[CHECK_GENERATION_STATUS] Status:', { hasPercentage, percentageCount, isLoading, isComplete });
 
         sendResponse({
           success: true,
           complete: isComplete,
           isLoading,
-          hasPercentage
+          hasPercentage,
+          percentageCount
         });
       } catch (e) {
         console.log('[CHECK_GENERATION_STATUS] Error:', e);

@@ -58,9 +58,29 @@ function ImageTab() {
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
 
+    // Prepare images based on mode
+    let workflowImages: string[] = []
+    let productImagesArray: string[] = []
+
+    if (multiSetMode === 'sameModel' && sharedModelImage) {
+      // sameModel mode: collect all product images, workflow will iterate through sets
+      productImagesArray = imageSets.map(set => set.product).filter((p): p is string => p !== null)
+      // First round: sharedModel + first product
+      workflowImages = [sharedModelImage, productImagesArray[0]].filter((img): img is string => img !== undefined)
+      console.log(`[handleCreate] sameModel mode: ${productImagesArray.length} products, starting with set 0`)
+    } else if (multiSetMode === 'none') {
+      workflowImages = images
+    } else {
+      // multi mode (different model per set) - flatten all images
+      imageSets.forEach(set => {
+        if (set.model) workflowImages.push(set.model)
+        if (set.product) workflowImages.push(set.product)
+      })
+    }
+
     // Create context from current state
     const context: ImageFlowContext = {
-      images,
+      images: workflowImages,
       style,
       productName,
       modelType,
@@ -75,6 +95,12 @@ function ImageTab() {
       isPromptFilled,
       isCreateClicked,
       autoSaveImage,
+      // Multi-set mode fields
+      multiSetMode,
+      currentSetIndex: 0,
+      totalSets: multiSetMode === 'sameModel' ? productImagesArray.length : undefined,
+      sharedModelImage: multiSetMode === 'sameModel' ? sharedModelImage : undefined,
+      productImages: multiSetMode === 'sameModel' ? productImagesArray : undefined,
     }
 
     // Set tab ID if we are on Flow
@@ -114,6 +140,9 @@ function ImageTab() {
             case 'projectEditorConfigured':
               actionName = 'generate'
               break
+            case 'generating':
+              actionName = 'waitForResult'
+              break
             default:
               console.warn(`No automatic action for node: ${node.id}`)
               return null
@@ -132,10 +161,24 @@ function ImageTab() {
           iterationCount++
           console.log(`[Auto Run] Iteration ${iterationCount}: Running action "${actionName}" on node "${currentNode.id}"`)
 
-          await currentNode.runAction(actionName, context)
+          const nextNodeId = await currentNode.runAction(actionName, context)
 
-          // Re-detect current node (URL may have changed)
-          currentNode = await workflowManager.getCurrentNode('image')
+          // Use nextNodeId if action specifies a transition, otherwise re-detect by URL
+          if (nextNodeId) {
+            console.log(`[Auto Run] Action returned nextNodeId: "${nextNodeId}"`)
+            const nextNode = workflowManager.getNodeById('image', nextNodeId)
+            if (nextNode) {
+              currentNode = nextNode
+            } else {
+              console.warn(`[Auto Run] Node "${nextNodeId}" not found, re-detecting...`)
+              currentNode = await workflowManager.getCurrentNode('image')
+            }
+          } else {
+            // No nextNodeId means workflow complete or re-detect needed
+            console.log('[Auto Run] No nextNodeId, re-detecting current node...')
+            currentNode = await workflowManager.getCurrentNode('image')
+          }
+
           if (!currentNode) {
             console.log('[Auto Run] No current node detected, workflow may be complete')
             break
@@ -238,8 +281,8 @@ function ImageTab() {
     if (mode === 'multi') {
       generateSets(setCount, false)
     } else if (mode === 'sameModel') {
-      // Clear sets - will be auto-created from uploads
-      setImageSets([])
+      // Create 2 empty product sets for sameModel mode
+      generateSets(2, true)
       setSharedModelImage(null)
     } else {
       setImageSets([])
