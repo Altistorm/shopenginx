@@ -1,4 +1,5 @@
 // TikTok Auto-Follow Workflow
+import { getKeepAliveManager } from './keepAlive';
 
 export interface TikTokConfig {
   maxFollowers: number
@@ -201,6 +202,7 @@ export class TikTokFollowWorkflow {
   private onStateChange: ((state: TikTokState) => void) | null = null
   private abortController: AbortController | null = null
   private processedProfiles: Set<string> = new Set()
+  private keepAliveManager = getKeepAliveManager()
 
   constructor(
     config: TikTokConfig,
@@ -213,10 +215,14 @@ export class TikTokFollowWorkflow {
   }
 
   private updateState(updates: Partial<TikTokState>) {
+    const prevSkipCount = this.state.skipCount
     this.state = { ...this.state, ...updates }
     saveState(this.state)
-    console.log('[TikTok] updateState - skipCount:', this.state.skipCount, 'onStateChange exists:', !!this.onStateChange)
-    this.onStateChange?.(this.state)
+    console.log('[TikTok] updateState - skipCount:', prevSkipCount, '->', this.state.skipCount, 'onStateChange exists:', !!this.onStateChange)
+    if (this.onStateChange) {
+      console.log('[TikTok] Calling onStateChange with state:', JSON.stringify({ skipCount: this.state.skipCount, status: this.state.status }))
+      this.onStateChange(this.state)
+    }
   }
 
   async start() {
@@ -231,6 +237,10 @@ export class TikTokFollowWorkflow {
       lastError: null
     })
 
+    // Start keep-alive to prevent throttling when browser is minimized
+    this.keepAliveManager.start()
+    console.log('[TikTok] Keep-alive started')
+
     try {
       await this.runWorkflow()
     } catch (error) {
@@ -241,6 +251,10 @@ export class TikTokFollowWorkflow {
           lastError: String(error)
         })
       }
+    } finally {
+      // Stop keep-alive when workflow ends
+      this.keepAliveManager.stop()
+      console.log('[TikTok] Keep-alive stopped')
     }
   }
 
@@ -250,6 +264,10 @@ export class TikTokFollowWorkflow {
     if (this.tabId) {
       sendToContent(this.tabId, { type: 'TIKTOK_STOP_RATE_LIMIT_OBSERVER' })
     }
+    // Stop keep-alive
+    this.keepAliveManager.stop()
+    console.log('[TikTok] Keep-alive stopped (via stop())')
+
     this.updateState({
       isRunning: false,
       isPaused: false,

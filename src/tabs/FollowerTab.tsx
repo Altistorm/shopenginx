@@ -108,6 +108,15 @@ function KeywordsModal({
   )
 }
 
+// Helper function to safely decode URL for display
+function decodeUrlForDisplay(url: string): string {
+  try {
+    return decodeURIComponent(url)
+  } catch {
+    return url // Return original if decoding fails
+  }
+}
+
 // URL List Modal Component
 function UrlListModal({
   isOpen,
@@ -182,7 +191,7 @@ function UrlListModal({
           {localUrls.map((url, index) => (
             <div key={index} className="flex items-center gap-2 bg-base-200 p-2 rounded">
               <span className="badge badge-sm">{index + 1}</span>
-              <span className="text-xs flex-1 truncate" title={url}>
+              <span className="text-xs flex-1 truncate" title={decodeUrlForDisplay(url)}>
                 {url}
               </span>
               <div className="flex gap-1">
@@ -274,6 +283,7 @@ function FollowerTab() {
 
   // Handle state changes from workflow
   const handleStateChange = useCallback((newState: TikTokState) => {
+    console.log('[FollowerTab] handleStateChange received:', { skipCount: newState.skipCount, status: newState.status })
     setTiktokState(newState)
   }, [])
 
