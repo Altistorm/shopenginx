@@ -250,12 +250,13 @@ export class TikTokFollowWorkflow {
           status: 'Error',
           lastError: String(error)
         })
+        // Only stop keep-alive on error (not on rate limit which calls runWorkflow recursively)
+        this.keepAliveManager.stop()
+        console.log('[TikTok] Keep-alive stopped (error)')
       }
-    } finally {
-      // Stop keep-alive when workflow ends
-      this.keepAliveManager.stop()
-      console.log('[TikTok] Keep-alive stopped')
     }
+    // Note: keep-alive is stopped in stop() method, not here
+    // This allows handleRateLimit() to recursively call runWorkflow() without stopping keep-alive
   }
 
   stop() {

@@ -76,9 +76,7 @@ export class PortKeepAlive implements KeepAliveStrategy {
  * AudioKeepAlive - Uses Web Audio API to prevent throttling
  *
  * Creates an inaudible audio context that prevents Chrome from throttling.
- * This is a backup strategy if PortKeepAlive doesn't work reliably.
- *
- * TODO: Implement when needed
+ * The audio thread runs at high priority, keeping timers responsive.
  */
 export class AudioKeepAlive implements KeepAliveStrategy {
   private audioContext: AudioContext | null = null;
@@ -189,11 +187,11 @@ export class KeepAliveManager {
   }
 }
 
-// Default export: PortKeepAlive with AudioKeepAlive as fallback
+// Default export: AudioKeepAlive (prevents throttling) with PortKeepAlive as fallback
 export function createKeepAliveManager(): KeepAliveManager {
   return new KeepAliveManager([
-    new PortKeepAlive(),
     new AudioKeepAlive(),
+    new PortKeepAlive(),
   ]);
 }
 
