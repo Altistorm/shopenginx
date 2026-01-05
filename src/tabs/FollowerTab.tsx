@@ -265,8 +265,12 @@ function FollowerTab() {
 
   // Load config and state on mount
   useEffect(() => {
-    setTiktokConfig(loadConfig())
-    setTiktokState(loadState())
+    const loadData = async () => {
+      const [config, state] = await Promise.all([loadConfig(), loadState()])
+      setTiktokConfig(config)
+      setTiktokState(state)
+    }
+    loadData()
   }, [])
 
   // Update config handler

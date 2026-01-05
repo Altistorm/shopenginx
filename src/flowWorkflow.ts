@@ -50,6 +50,8 @@ export interface ImageFlowContext {
   currentImageIndex?: number;
   // Auto save images after generation
   autoSaveImage?: boolean;
+  // Download resolution for auto save (1K, 2K, 4K)
+  downloadResolution?: '1K' | '2K' | '4K';
   // Track image count before generation (to know how many new images were created)
   imageCountBeforeGeneration?: number;
   // Track image UUIDs before generation (more accurate with lazy loading)
@@ -649,7 +651,8 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
             // Download each new image by clicking its download button
             const downloadResponse = await chrome.tabs.sendMessage(ctx.tabId, {
               type: 'DOWNLOAD_IMAGES_BY_UUID',
-              uuids: newImageUUIDs
+              uuids: newImageUUIDs,
+              resolution: ctx.downloadResolution || '2K'
             });
             console.log('[finish] Download response:', downloadResponse);
           }
@@ -684,7 +687,8 @@ function createImageWorkflow(): Workflow<ImageFlowContext> {
           if (newImageUUIDs.length > 0) {
             await chrome.tabs.sendMessage(ctx.tabId, {
               type: 'DOWNLOAD_IMAGES_BY_UUID',
-              uuids: newImageUUIDs
+              uuids: newImageUUIDs,
+              resolution: ctx.downloadResolution || '2K'
             });
           }
         }

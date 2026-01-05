@@ -22,7 +22,8 @@ function ImageTab() {
   const [aspectRatio, setAspectRatio] = useState('9:16')
   const [imageCount, setImageCount] = useState(4)
   const [noTextOnImage, setNoTextOnImage] = useState(false)
-  const [autoSaveImage, setAutoSaveImage] = useState(false)
+  const [autoSaveImage, setAutoSaveImage] = useState(true)
+  const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('2K')
   const [enableLoop, setEnableLoop] = useState(false)
   const [loopCount, setLoopCount] = useState(5)
   const [autoRunWorkflow, setAutoRunWorkflow] = useState(true)
@@ -95,6 +96,7 @@ function ImageTab() {
       isPromptFilled,
       isCreateClicked,
       autoSaveImage,
+      downloadResolution,
       // Multi-set mode fields
       multiSetMode,
       currentSetIndex: 0,
@@ -679,15 +681,28 @@ function ImageTab() {
           <span className="select-text">🚫 ไม่ต้องมีข้อความบนภาพ</span>
         </label>
 
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-primary checkbox-xs"
-            checked={autoSaveImage}
-            onChange={(e) => setAutoSaveImage(e.target.checked)}
-          />
-          <span className="select-text">💾 Auto Save รูปลงเครื่อง</span>
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-primary checkbox-xs"
+              checked={autoSaveImage}
+              onChange={(e) => setAutoSaveImage(e.target.checked)}
+            />
+            <span className="select-text">💾 Auto Save รูปลงเครื่อง</span>
+          </label>
+          {autoSaveImage && (
+            <select
+              className="select select-bordered select-xs"
+              value={downloadResolution}
+              onChange={(e) => setDownloadResolution(e.target.value as '1K' | '2K' | '4K')}
+            >
+              <option value="1K">1K</option>
+              <option value="2K">2K</option>
+              <option value="4K">4K</option>
+            </select>
+          )}
+        </div>
 
         <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
           <input

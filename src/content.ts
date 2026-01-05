@@ -175,6 +175,16 @@ class FlowImageTracker {
   private observer: MutationObserver | null = null;
   private isTracking: boolean = false;
 
+  // Completion detection state
+  private snapshotBeforeGeneration: string[] = [];
+  private expectedNewImageCount: number = 0;
+  private completionResolver: ((newUUIDs: string[]) => void) | null = null;
+  private completionTimeout: ReturnType<typeof setTimeout> | null = null;
+  private pendingImagesWithoutSrc: Set<HTMLImageElement> = new Set();
+  private detectedNewUUIDs: Set<string> = new Set();
+  private lastPercentage: number = 0;
+  private isGenerating: boolean = false;
+
   // Extract UUID from image src URL
   private extractUUID(src: string): string | null {
     const match = src.match(/image\/([a-f0-9-]+)/);
@@ -247,6 +257,123 @@ class FlowImageTracker {
     }
   }
 
+  // Track an image that has alt="Flow Image:..." but no valid UUID src yet
+  private trackPendingImage(img: HTMLImageElement) {
+    const uuid = this.extractUUID(img.src);
+    if (!uuid) {
+      // No UUID yet - add to pending
+      if (!this.pendingImagesWithoutSrc.has(img)) {
+        this.pendingImagesWithoutSrc.add(img);
+        console.log('[FlowImageTracker] 📥 Pending image added (no UUID yet), total pending:', this.pendingImagesWithoutSrc.size);
+      }
+    } else {
+      // Already has UUID - handle immediately
+      this.handleNewUUID(uuid, img);
+    }
+  }
+
+  // Handle when an image gets a valid UUID (either from src change or initial load)
+  private handleNewUUID(uuid: string, img: HTMLImageElement) {
+    // Remove from pending if it was there
+    this.pendingImagesWithoutSrc.delete(img);
+
+    // Check if this is a new UUID (not in snapshot before generation)
+    const isNew = !this.snapshotBeforeGeneration.includes(uuid);
+
+    if (isNew && !this.detectedNewUUIDs.has(uuid)) {
+      this.detectedNewUUIDs.add(uuid);
+      console.log('[FlowImageTracker] ✨ New UUID detected:', uuid.substring(0, 8), 'total new:', this.detectedNewUUIDs.size, '/', this.expectedNewImageCount);
+
+      // Check completion immediately - MutationObserver gives us exact timing
+      this.checkCompletion();
+    }
+  }
+
+  // Handle src attribute change on an image
+  private handleSrcChange(img: HTMLImageElement) {
+    const uuid = this.extractUUID(img.src);
+    if (uuid) {
+      this.handleNewUUID(uuid, img);
+    }
+  }
+
+  // Check if generation is complete
+  private checkCompletion() {
+    if (!this.isGenerating || !this.completionResolver) {
+      return;
+    }
+
+    const newUUIDCount = this.detectedNewUUIDs.size;
+    const pendingCount = this.pendingImagesWithoutSrc.size;
+
+    console.log('[FlowImageTracker] 🔍 Completion check:', {
+      newUUIDs: newUUIDCount,
+      expected: this.expectedNewImageCount,
+      pending: pendingCount
+    });
+
+    // Complete if we have expected count and no pending images
+    if (newUUIDCount >= this.expectedNewImageCount && pendingCount === 0) {
+      console.log('[FlowImageTracker] ✅ Generation complete! New UUIDs:', Array.from(this.detectedNewUUIDs));
+      this.resolveCompletion();
+    }
+  }
+
+  // Resolve the completion promise
+  private resolveCompletion() {
+    if (this.completionResolver) {
+      const newUUIDs = Array.from(this.detectedNewUUIDs);
+      this.completionResolver(newUUIDs);
+      this.completionResolver = null;
+    }
+
+    if (this.completionTimeout) {
+      clearTimeout(this.completionTimeout);
+      this.completionTimeout = null;
+    }
+
+    this.isGenerating = false;
+  }
+
+  // Handle percentage update from characterData mutation
+  private handlePercentageUpdate(percentage: number) {
+    if (percentage !== this.lastPercentage) {
+      console.log('[FlowImageTracker] 📊 Percentage update:', this.lastPercentage, '->', percentage);
+      this.lastPercentage = percentage;
+    }
+  }
+
+  // Start waiting for new images (call before clicking Create)
+  waitForNewImages(expectedCount: number, timeoutMs: number = 120000): Promise<string[]> {
+    return new Promise((resolve) => {
+      // Take snapshot before generation
+      this.snapshotBeforeGeneration = [...this.orderedIds];
+      this.expectedNewImageCount = expectedCount;
+      this.detectedNewUUIDs.clear();
+      this.pendingImagesWithoutSrc.clear();
+      this.isGenerating = true;
+      this.lastPercentage = 0;
+
+      console.log('[FlowImageTracker] 🚀 Waiting for', expectedCount, 'new images. Snapshot:', this.snapshotBeforeGeneration.length, 'existing');
+
+      this.completionResolver = resolve;
+
+      // Set timeout
+      this.completionTimeout = setTimeout(() => {
+        console.log('[FlowImageTracker] ⏰ Timeout reached. Returning detected UUIDs:', Array.from(this.detectedNewUUIDs));
+        this.resolveCompletion();
+      }, timeoutMs);
+    });
+  }
+
+  // Cancel waiting for new images
+  cancelWait() {
+    if (this.completionResolver) {
+      console.log('[FlowImageTracker] ❌ Wait cancelled');
+      this.resolveCompletion();
+    }
+  }
+
   // Start tracking images
   start() {
     if (this.isTracking) {
@@ -261,18 +388,61 @@ class FlowImageTracker {
     const onMutation = (mutations: MutationRecord[]) => {
       let hasRelevantChanges = false;
 
+      // Log all mutations for debugging
+      console.log('[MutationObserver] Triggered, mutations:', mutations.length);
+
       for (const mutation of mutations) {
+        // Log ALL mutations without filtering
+        const targetEl = mutation.target as HTMLElement;
+        const targetInfo = targetEl.tagName ?
+          `${targetEl.tagName}${targetEl.className ? '.' + String(targetEl.className).substring(0, 40) : ''}` :
+          (mutation.target instanceof Text ? `TEXT:"${mutation.target.textContent?.substring(0, 30)}"` : 'unknown');
+
+        console.log('[MutationObserver]', JSON.stringify({
+          type: mutation.type,
+          target: targetInfo,
+          addedNodes: mutation.addedNodes.length,
+          removedNodes: mutation.removedNodes.length,
+          attributeName: mutation.attributeName,
+          oldValue: mutation.oldValue?.substring(0, 30)
+        }));
+
         // Check added nodes
         mutation.addedNodes.forEach((node) => {
           if (node instanceof HTMLElement) {
+            const nodeInfo = node.tagName + (node.className ? '.' + String(node.className).substring(0, 30) : '');
+
             // Check if it's an image or contains images
             if (node.matches && node.matches('img[alt^="Flow Image:"]')) {
+              console.log('[FlowImageTracker] 🖼️ Flow Image added directly:', nodeInfo, (node as HTMLImageElement).src?.substring(0, 60));
               hasRelevantChanges = true;
+              // Track this image for completion detection
+              if (this.isGenerating) {
+                this.trackPendingImage(node as HTMLImageElement);
+              }
             } else if (node.querySelectorAll) {
               const imgs = node.querySelectorAll('img[alt^="Flow Image:"]');
               if (imgs.length > 0) {
+                console.log('[FlowImageTracker] 🖼️ Container with Flow Images added:', nodeInfo, 'images:', imgs.length);
                 hasRelevantChanges = true;
+                // Track each image for completion detection
+                if (this.isGenerating) {
+                  imgs.forEach((img) => {
+                    this.trackPendingImage(img as HTMLImageElement);
+                  });
+                }
               }
+            }
+
+            // Log any text content that might contain percentages
+            const textContent = node.textContent?.trim();
+            if (textContent && /\d{1,3}%/.test(textContent)) {
+              console.log('[FlowImageTracker] 📊 Percentage text detected in added node:', nodeInfo, 'text:', textContent.substring(0, 50));
+            }
+          } else if (node instanceof Text) {
+            const textContent = node.textContent?.trim();
+            if (textContent && /\d{1,3}%/.test(textContent)) {
+              console.log('[FlowImageTracker] 📊 Percentage text node added:', textContent);
             }
           }
         });
@@ -281,12 +451,37 @@ class FlowImageTracker {
         if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
           const target = mutation.target as HTMLElement;
           if (target.matches && target.matches('img[alt^="Flow Image:"]')) {
+            console.log('[FlowImageTracker] 🔄 Image src changed:', (target as HTMLImageElement).src?.substring(0, 60));
             hasRelevantChanges = true;
+            // Handle src change for completion detection
+            if (this.isGenerating) {
+              this.handleSrcChange(target as HTMLImageElement);
+            }
+          }
+        }
+
+        // Log characterData changes (text content updates) - percentage tracking
+        if (mutation.type === 'characterData') {
+          const textContent = (mutation.target as Text).textContent?.trim();
+          if (textContent) {
+            // Check if it's a percentage number (just digits, no % symbol)
+            const percentMatch = textContent.match(/^(\d{1,3})$/);
+            if (percentMatch) {
+              const percentage = parseInt(percentMatch[1], 10);
+              if (percentage >= 0 && percentage <= 100) {
+                this.handlePercentageUpdate(percentage);
+              }
+            }
+            // Also check for XX% format
+            if (/^\d{1,3}%$/.test(textContent)) {
+              console.log('[FlowImageTracker] 📊 Text content changed to percentage:', textContent);
+            }
           }
         }
       }
 
       if (hasRelevantChanges) {
+        console.log('[FlowImageTracker] ✅ Relevant changes detected, updating image order...');
         // Debounce updates
         setTimeout(() => this.updateImageOrder(), 100);
       }
@@ -301,8 +496,12 @@ class FlowImageTracker {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src']
+      attributeFilter: ['src'],
+      characterData: true,
+      characterDataOldValue: true
     });
+
+    console.log('[FlowImageTracker] Observer attached to:', container.tagName, container.className?.substring(0, 50));
 
     this.isTracking = true;
     console.log('[FlowImageTracker] Started tracking');
@@ -342,6 +541,22 @@ class FlowImageTracker {
   // Reset tracker
   reset() {
     this.orderedIds = [];
+    this.snapshotBeforeGeneration = [];
+    this.expectedNewImageCount = 0;
+    this.detectedNewUUIDs.clear();
+    this.pendingImagesWithoutSrc.clear();
+    this.isGenerating = false;
+    this.lastPercentage = 0;
+
+    if (this.completionTimeout) {
+      clearTimeout(this.completionTimeout);
+      this.completionTimeout = null;
+    }
+    if (this.completionResolver) {
+      this.completionResolver([]);
+      this.completionResolver = null;
+    }
+
     console.log('[FlowImageTracker] Reset');
   }
 
@@ -1387,6 +1602,48 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       break;
 
+    case 'WAIT_FOR_NEW_IMAGES':
+      (async () => {
+        try {
+          const expectedCount: number = message.expectedCount || 4;
+          const timeoutMs: number = message.timeoutMs || 120000;
+
+          console.log('[WAIT_FOR_NEW_IMAGES] Starting wait for', expectedCount, 'images, timeout:', timeoutMs);
+
+          // Start the tracker if not already running
+          if (!flowImageTracker.isActive()) {
+            flowImageTracker.start();
+          }
+
+          // Wait for new images using MutationObserver-based detection
+          const newUUIDs = await flowImageTracker.waitForNewImages(expectedCount, timeoutMs);
+
+          console.log('[WAIT_FOR_NEW_IMAGES] Completed with', newUUIDs.length, 'new UUIDs:', newUUIDs);
+
+          sendResponse({
+            success: true,
+            complete: newUUIDs.length >= expectedCount,
+            newUUIDs: newUUIDs,
+            count: newUUIDs.length
+          });
+        } catch (e) {
+          console.log('[WAIT_FOR_NEW_IMAGES] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true; // Keep message channel open for async response
+
+    case 'CANCEL_WAIT_FOR_IMAGES':
+      try {
+        flowImageTracker.cancelWait();
+        console.log('[CANCEL_WAIT_FOR_IMAGES] Wait cancelled');
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[CANCEL_WAIT_FOR_IMAGES] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
     case 'DOWNLOAD_NEW_IMAGES':
       try {
         const previousCount: number = message.previousCount || 0;
@@ -1449,7 +1706,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       (async () => {
         try {
           const uuids: string[] = message.uuids || [];
-          console.log('[DOWNLOAD_IMAGES_BY_UUID] Downloading images with UUIDs:', uuids);
+          const resolution: string = message.resolution || '2K';
+          console.log('[DOWNLOAD_IMAGES_BY_UUID] Downloading images with UUIDs:', uuids, 'Resolution:', resolution);
 
           if (uuids.length === 0) {
             sendResponse({ success: true, downloaded: 0 });
@@ -1493,10 +1751,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               continue;
             }
 
-            // Click download button - downloads directly without menu
+            // Click download button - may show resolution menu (Pro) or download directly (non-Pro)
             downloadBtn.click();
-            downloadedCount++;
             console.log(`[DOWNLOAD_IMAGES_BY_UUID] Clicked download button for UUID: ${uuid}`);
+
+            // Wait for resolution menu to appear (Pro subscription feature)
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Check if resolution menu appeared (Pro subscription active)
+            const resolutionMenu = document.querySelector('div[role="menuitem"]');
+            if (resolutionMenu) {
+              // Find the target resolution option
+              const menuItems = document.querySelectorAll('div[role="menuitem"]');
+              let targetOption: HTMLElement | null = null;
+              const targetResolution = `Download ${resolution}`;
+
+              for (const item of menuItems) {
+                const text = item.textContent || '';
+                if (text.includes(targetResolution)) {
+                  targetOption = item as HTMLElement;
+                  break;
+                }
+              }
+
+              if (targetOption) {
+                console.log(`[DOWNLOAD_IMAGES_BY_UUID] Selecting resolution: ${targetOption.textContent?.trim()}`);
+                targetOption.click();
+              } else {
+                // Fallback: click first available option if target not found
+                console.log(`[DOWNLOAD_IMAGES_BY_UUID] Target resolution ${resolution} not found, clicking first option`);
+                (menuItems[0] as HTMLElement)?.click();
+              }
+            } else {
+              // No resolution menu - direct download (non-Pro or old UI)
+              console.log(`[DOWNLOAD_IMAGES_BY_UUID] No resolution menu, direct download for UUID: ${uuid}`);
+            }
+
+            downloadedCount++;
 
             // Wait between downloads to avoid issues
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1575,6 +1866,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ success: clicked, error: clicked ? undefined : 'Users tab not found' });
       } catch (e) {
         console.log('[TIKTOK_CLICK_USERS_TAB] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_CHECK_NO_RESULTS':
+      try {
+        // Check if "No results found for" message is displayed
+        // Element: h2[data-e2e="search-error-title"] with text "No results found for ..."
+        const noResultsHeading = document.querySelector('[data-e2e="search-error-title"]');
+        const hasNoResults = noResultsHeading !== null &&
+                            noResultsHeading.textContent?.includes('No results found for');
+
+        console.log('[TIKTOK_CHECK_NO_RESULTS]', {
+          hasNoResults,
+          text: noResultsHeading?.textContent?.substring(0, 50)
+        });
+
+        sendResponse({ success: true, noResults: hasNoResults });
+      } catch (e) {
+        console.log('[TIKTOK_CHECK_NO_RESULTS] Error:', e);
         sendResponse({ success: false, error: String(e) });
       }
       break;

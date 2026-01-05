@@ -36,18 +36,24 @@ export interface TikTokProfile {
 }
 
 export const DEFAULT_CONFIG: TikTokConfig = {
-  maxFollowers: 1300,
-  keywords: ['ติดตาม', 'ฟอล', 'แลก', 'ใจกลับ'],
-  minDelay: 0.5,
-  maxDelay: 1.5,
-  skipThreshold: 20,
-  cycleThreshold: 5,
+  maxFollowers: 2000,
+  keywords: ['ติดตาม', 'ฟอล', 'แลก', 'ใจกลับ', 'ตามกลับ', 'ตาม กลับ', 'ใจ กลับ', 'เพิ่มเพื่อน'],
+  minDelay: 1.2,
+  maxDelay: 1.8,
+  skipThreshold: 40,
+  cycleThreshold: 3,
   urls: [
     'https://www.tiktok.com/search?q=%E0%B9%81%E0%B8%A5%E0%B8%81%E0%B8%9F%E0%B8%AD%E0%B8%A5&t=1766902207982',
-    'https://www.tiktok.com/search/user?q=%E0%B8%9F%E0%B8%AD%E0%B8%A5%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1766902855595'
+    'https://www.tiktok.com/search/user?q=%E0%B8%9F%E0%B8%AD%E0%B8%A5%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1766902855595',
+    'https://www.tiktok.com/search/user?q=%E0%B9%83%E0%B8%88%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1766979267915',
+    'https://www.tiktok.com/search/user?q=%E0%B8%95%E0%B8%B2%E0%B8%A1%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1767004816761',
+    'https://www.tiktok.com/search/user?q=%E0%B9%80%E0%B8%9E%E0%B8%B4%E0%B9%88%E0%B8%A1%E0%B9%80%E0%B8%9E%E0%B8%B7%E0%B9%88%E0%B8%AD%E0%B8%99&t=1767067767041',
+    'https://www.tiktok.com/search/user?q=%E0%B9%81%E0%B8%A5%E0%B8%81%E0%B9%80%E0%B8%9E%E0%B8%B7%E0%B9%88%E0%B8%AD%E0%B8%99&t=1767067826560',
+    'https://www.tiktok.com/search/user?q=%E0%B9%81%E0%B8%A5%E0%B8%81%E0%B8%9C%E0%B8%B9%E0%B9%89%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B2%E0%B8%A1&t=1767069176479',
+    'https://www.tiktok.com/search/user?q=%E0%B9%80%E0%B8%9E%E0%B8%B4%E0%B9%88%E0%B8%A1%E0%B8%9C%E0%B8%B9%E0%B9%89%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B2%E0%B8%A1&t=1767069130615'
   ],
-  waitTimeMin: 60,  // 1 hour
-  waitTimeMax: 90   // 1.5 hours
+  waitTimeMin: 65,
+  waitTimeMax: 75
 }
 
 export const INITIAL_STATE: TikTokState = {
@@ -67,12 +73,12 @@ export const INITIAL_STATE: TikTokState = {
 const CONFIG_KEY = 'tiktok_follow_config'
 const STATE_KEY = 'tiktok_follow_state'
 
-// Load config from localStorage
-export function loadConfig(): TikTokConfig {
+// Load config from chrome.storage.local
+export async function loadConfig(): Promise<TikTokConfig> {
   try {
-    const stored = localStorage.getItem(CONFIG_KEY)
-    if (stored) {
-      return { ...DEFAULT_CONFIG, ...JSON.parse(stored) }
+    const result = await chrome.storage.local.get(CONFIG_KEY)
+    if (result[CONFIG_KEY]) {
+      return { ...DEFAULT_CONFIG, ...result[CONFIG_KEY] }
     }
   } catch (e) {
     console.error('Failed to load TikTok config:', e)
@@ -80,21 +86,19 @@ export function loadConfig(): TikTokConfig {
   return { ...DEFAULT_CONFIG }
 }
 
-// Save config to localStorage
+// Save config to chrome.storage.local
 export function saveConfig(config: TikTokConfig): void {
-  try {
-    localStorage.setItem(CONFIG_KEY, JSON.stringify(config))
-  } catch (e) {
+  chrome.storage.local.set({ [CONFIG_KEY]: config }).catch(e => {
     console.error('Failed to save TikTok config:', e)
-  }
+  })
 }
 
-// Load state from localStorage
-export function loadState(): TikTokState {
+// Load state from chrome.storage.local
+export async function loadState(): Promise<TikTokState> {
   try {
-    const stored = localStorage.getItem(STATE_KEY)
-    if (stored) {
-      const state = JSON.parse(stored)
+    const result = await chrome.storage.local.get(STATE_KEY)
+    if (result[STATE_KEY]) {
+      const state = result[STATE_KEY]
       // Check if we were paused and should resume
       if (state.isPaused && state.nextResumeTime) {
         if (Date.now() >= state.nextResumeTime) {
@@ -110,13 +114,11 @@ export function loadState(): TikTokState {
   return { ...INITIAL_STATE }
 }
 
-// Save state to localStorage
+// Save state to chrome.storage.local
 export function saveState(state: TikTokState): void {
-  try {
-    localStorage.setItem(STATE_KEY, JSON.stringify(state))
-  } catch (e) {
+  chrome.storage.local.set({ [STATE_KEY]: state }).catch(e => {
     console.error('Failed to save TikTok state:', e)
-  }
+  })
 }
 
 // Random delay helper
@@ -203,6 +205,7 @@ export class TikTokFollowWorkflow {
   private abortController: AbortController | null = null
   private processedProfiles: Set<string> = new Set()
   private keepAliveManager = getKeepAliveManager()
+  private consecutiveNoResults: number = 0
 
   constructor(
     config: TikTokConfig,
@@ -324,6 +327,36 @@ export class TikTokFollowWorkflow {
     }
     await sleep(2)
     this.checkAborted()
+
+    // Step 2.5: Check for "No results found" - if detected, switch to next URL
+    const noResultsCheck = await sendToContent(this.tabId, { type: 'TIKTOK_CHECK_NO_RESULTS' })
+    console.log('[TikTok] No results check:', noResultsCheck)
+    if (noResultsCheck.success && noResultsCheck.noResults) {
+      this.consecutiveNoResults++
+      console.log('[TikTok] No results found for current URL. Consecutive:', this.consecutiveNoResults, '/', this.config.urls.length)
+
+      // If all URLs have no results, trigger rate limit wait
+      if (this.consecutiveNoResults >= this.config.urls.length) {
+        console.log('[TikTok] All URLs returned no results - triggering rate limit wait...')
+        this.updateState({ status: 'All URLs empty - waiting...' })
+        this.consecutiveNoResults = 0
+        await this.handleRateLimit()
+        return
+      }
+
+      // Switch to next URL
+      this.updateState({
+        currentUrlIndex: (this.state.currentUrlIndex + 1) % this.config.urls.length,
+        status: 'No results - switching URL...'
+      })
+      this.processedProfiles.clear()
+      // Restart with new URL
+      await this.runWorkflow()
+      return
+    }
+
+    // Reset counter when results are found
+    this.consecutiveNoResults = 0
 
     console.log('[TikTok] === Entering profileLoop() ===')
     // Step 3: Main loop - scan and follow profiles
