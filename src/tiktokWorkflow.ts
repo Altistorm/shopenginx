@@ -13,6 +13,14 @@ export interface TikTokConfig {
   waitTimeMax: number
 }
 
+// Following list data for pre-check optimization
+export interface FollowingListData {
+  userIds: string[]       // List of followed user IDs
+  lastUpdated: number     // Timestamp of last fetch
+  count: number           // Total count
+  fetchedBy: string       // Username who fetched (for multi-account support)
+}
+
 export interface TikTokState {
   isRunning: boolean
   isPaused: boolean
@@ -72,6 +80,15 @@ export const INITIAL_STATE: TikTokState = {
 // Storage keys
 const CONFIG_KEY = 'tiktok_follow_config'
 const STATE_KEY = 'tiktok_follow_state'
+const FOLLOWING_LIST_KEY = 'tiktok_following_list'
+
+// Default empty following list
+export const EMPTY_FOLLOWING_LIST: FollowingListData = {
+  userIds: [],
+  lastUpdated: 0,
+  count: 0,
+  fetchedBy: ''
+}
 
 // Load config from chrome.storage.local
 export async function loadConfig(): Promise<TikTokConfig> {
@@ -119,6 +136,48 @@ export function saveState(state: TikTokState): void {
   chrome.storage.local.set({ [STATE_KEY]: state }).catch(e => {
     console.error('Failed to save TikTok state:', e)
   })
+}
+
+// Load following list from chrome.storage.local
+export async function loadFollowingList(): Promise<FollowingListData> {
+  try {
+    const result = await chrome.storage.local.get(FOLLOWING_LIST_KEY)
+    if (result[FOLLOWING_LIST_KEY]) {
+      return { ...EMPTY_FOLLOWING_LIST, ...result[FOLLOWING_LIST_KEY] }
+    }
+  } catch (e) {
+    console.error('Failed to load following list:', e)
+  }
+  return { ...EMPTY_FOLLOWING_LIST }
+}
+
+// Save following list to chrome.storage.local
+export function saveFollowingList(data: FollowingListData): void {
+  chrome.storage.local.set({ [FOLLOWING_LIST_KEY]: data }).catch(e => {
+    console.error('Failed to save following list:', e)
+  })
+}
+
+// Add a single user ID to the following list (for auto-add on follow)
+export async function addToFollowingList(userId: string): Promise<void> {
+  try {
+    const current = await loadFollowingList()
+    if (!current.userIds.includes(userId)) {
+      current.userIds.push(userId)
+      current.count = current.userIds.length
+      current.lastUpdated = Date.now()
+      saveFollowingList(current)
+      console.log('[TikTok] Added user to following list:', userId, 'Total:', current.count)
+    }
+  } catch (e) {
+    console.error('Failed to add to following list:', e)
+  }
+}
+
+// Clear following list
+export function clearFollowingList(): void {
+  saveFollowingList({ ...EMPTY_FOLLOWING_LIST })
+  console.log('[TikTok] Following list cleared')
 }
 
 // Random delay helper
@@ -321,6 +380,7 @@ export class TikTokFollowWorkflow {
   private onStateChange: ((state: TikTokState) => void) | null = null
   private abortController: AbortController | null = null
   private processedProfiles: Set<string> = new Set()
+  private followingUserIds: Set<string> = new Set()  // Pre-loaded following list for skip check
   private keepAliveManager = getKeepAliveManager()
   private consecutiveNoResults: number = 0
 
@@ -350,6 +410,12 @@ export class TikTokFollowWorkflow {
 
     this.abortController = new AbortController()
     this.processedProfiles.clear()
+
+    // Load following list for pre-skip check
+    const followingListData = await loadFollowingList()
+    this.followingUserIds = new Set(followingListData.userIds)
+    console.log('[TikTok] Loaded following list:', this.followingUserIds.size, 'users')
+
     this.updateState({
       isRunning: true,
       isPaused: false,
@@ -623,6 +689,23 @@ export class TikTokFollowWorkflow {
           continue
         }
 
+        // Check following list (pre-skip optimization) - AFTER keyword check
+        // Use username as user ID since it's the unique identifier we can access
+        if (this.followingUserIds.has(profile.username)) {
+          const newSkipCount = this.state.skipCount + 1
+          console.log(`[TikTok] PRE-SKIP: in following list (skipCount: ${newSkipCount}/${this.config.skipThreshold})`)
+          this.updateState({
+            skipCount: newSkipCount,
+            status: `Pre-skipped (following): ${profile.name.substring(0, 15)}...`
+          })
+          // Break out of for loop if threshold reached - let while loop handle reload
+          if (newSkipCount >= this.config.skipThreshold) {
+            console.log('[TikTok] Skip threshold reached from pre-skip, breaking out')
+            break
+          }
+          continue
+        }
+
         // All criteria passed - follow!
         console.log('[TikTok] MATCH! Following:', profile.name, 'isNewLayout:', isNewLayout)
 
@@ -651,6 +734,10 @@ export class TikTokFollowWorkflow {
               followCount: this.state.followCount + 1,
               status: `Followed: ${profile.name.substring(0, 20)}`
             })
+
+            // Auto-add to following list for future pre-skip
+            this.followingUserIds.add(profile.username)
+            addToFollowingList(profile.username)
 
             // Check for rate limit after follow
             await sleep(0.5)
@@ -681,6 +768,10 @@ export class TikTokFollowWorkflow {
               followCount: this.state.followCount + 1,
               status: `Followed: ${profile.name.substring(0, 20)}`
             })
+
+            // Auto-add to following list for future pre-skip
+            this.followingUserIds.add(profile.username)
+            addToFollowingList(profile.username)
 
             // Wait a moment for any toast notification to appear
             await sleep(0.5)

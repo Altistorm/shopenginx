@@ -8,7 +8,12 @@ import {
   loadConfig,
   saveConfig,
   loadState,
-  saveState
+  saveState,
+  FollowingListData,
+  loadFollowingList,
+  saveFollowingList,
+  clearFollowingList,
+  EMPTY_FOLLOWING_LIST
 } from '../tiktokWorkflow'
 
 interface PlatformConfig {
@@ -253,6 +258,11 @@ function FollowerTab() {
   const [showUrlsModal, setShowUrlsModal] = useState(false)
   const workflowRef = useRef<TikTokFollowWorkflow | null>(null)
 
+  // Following list state
+  const [followingList, setFollowingList] = useState<FollowingListData>(EMPTY_FOLLOWING_LIST)
+  const [isFetchingFollowing, setIsFetchingFollowing] = useState(false)
+  const [fetchingProgress, setFetchingProgress] = useState(0)
+
   // Other platforms
   const [facebook, setFacebook] = useState<PlatformConfig>({
     enabled: false,
@@ -265,14 +275,30 @@ function FollowerTab() {
     targetFollowers: 1000
   })
 
-  // Load config and state on mount
+  // Load config, state and following list on mount
   useEffect(() => {
     const loadData = async () => {
-      const [config, state] = await Promise.all([loadConfig(), loadState()])
+      const [config, state, following] = await Promise.all([
+        loadConfig(),
+        loadState(),
+        loadFollowingList()
+      ])
       setTiktokConfig(config)
       setTiktokState(state)
+      setFollowingList(following)
     }
     loadData()
+  }, [])
+
+  // Listen for progress updates during following list extraction
+  useEffect(() => {
+    const handleMessage = (message: { type: string; count?: number }) => {
+      if (message.type === 'TIKTOK_FOLLOWING_PROGRESS' && typeof message.count === 'number') {
+        setFetchingProgress(message.count)
+      }
+    }
+    chrome.runtime.onMessage.addListener(handleMessage)
+    return () => chrome.runtime.onMessage.removeListener(handleMessage)
   }, [])
 
   // Update config handler
@@ -318,6 +344,85 @@ function FollowerTab() {
     setTiktokState(newState)
     saveState(newState)
   }, [])
+
+  // Fetch following list from TikTok profile
+  const fetchFollowingList = useCallback(async () => {
+    if (isFetchingFollowing) return
+
+    setIsFetchingFollowing(true)
+    setFetchingProgress(0)
+
+    try {
+      // Get current active tab (should be a TikTok profile page)
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+
+      if (!tab?.id || !tab.url?.includes('tiktok.com/@')) {
+        alert('Please navigate to your TikTok profile page first (tiktok.com/@username)')
+        setIsFetchingFollowing(false)
+        return
+      }
+
+      // Open the following modal
+      const openResult = await chrome.tabs.sendMessage(tab.id, { type: 'TIKTOK_OPEN_FOLLOWING_MODAL' })
+      if (!openResult.success) {
+        alert('Could not open following modal. Make sure you are on a TikTok profile page.')
+        setIsFetchingFollowing(false)
+        return
+      }
+
+      // Wait for modal to open
+      await new Promise(resolve => setTimeout(resolve, 1000))
+
+      // Extract following list
+      const extractResult = await chrome.tabs.sendMessage(tab.id, { type: 'TIKTOK_EXTRACT_FOLLOWING_LIST' })
+
+      // Close the modal
+      await chrome.tabs.sendMessage(tab.id, { type: 'TIKTOK_CLOSE_MODAL' })
+
+      if (extractResult.success && extractResult.userIds) {
+        const newFollowingList: FollowingListData = {
+          userIds: extractResult.userIds,
+          count: extractResult.count,
+          lastUpdated: Date.now(),
+          fetchedBy: tab.url.match(/@([^/?]+)/)?.[1] || 'unknown'
+        }
+        saveFollowingList(newFollowingList)
+        setFollowingList(newFollowingList)
+        console.log('[FollowerTab] Following list updated:', extractResult.count, 'users')
+      } else {
+        alert('Failed to extract following list: ' + (extractResult.error || 'Unknown error'))
+      }
+    } catch (e) {
+      console.error('[FollowerTab] Error fetching following list:', e)
+      alert('Error fetching following list: ' + String(e))
+    } finally {
+      setIsFetchingFollowing(false)
+    }
+  }, [isFetchingFollowing])
+
+  // Clear following list
+  const handleClearFollowingList = useCallback(() => {
+    if (confirm('Are you sure you want to clear the following list cache?')) {
+      clearFollowingList()
+      setFollowingList(EMPTY_FOLLOWING_LIST)
+    }
+  }, [])
+
+  // Format last updated time
+  const formatLastUpdated = (timestamp: number): string => {
+    if (!timestamp) return 'Never'
+    const date = new Date(timestamp)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    const diffDays = Math.floor(diffMs / 86400000)
+
+    if (diffMins < 1) return 'Just now'
+    if (diffMins < 60) return `${diffMins}m ago`
+    if (diffHours < 24) return `${diffHours}h ago`
+    return `${diffDays}d ago`
+  }
 
   // Format remaining time
   const formatRemainingTime = (timestamp: number | null): string => {
@@ -536,6 +641,54 @@ function FollowerTab() {
             >
               Manage URLs
             </button>
+          </div>
+
+          {/* Following List Cache */}
+          <div className="divider text-xs opacity-50">Following List Cache</div>
+
+          <div className="bg-base-200 rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium">
+                  {isFetchingFollowing ? (
+                    <>Extracting... {fetchingProgress.toLocaleString()} found</>
+                  ) : (
+                    <>{followingList.count.toLocaleString()} users cached</>
+                  )}
+                </div>
+                <div className="text-xs opacity-60">
+                  {followingList.lastUpdated ? (
+                    <>Updated: {formatLastUpdated(followingList.lastUpdated)}</>
+                  ) : (
+                    <>No data fetched yet</>
+                  )}
+                  {followingList.fetchedBy && (
+                    <> (by @{followingList.fetchedBy})</>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                className={`btn btn-outline btn-sm flex-1 ${isFetchingFollowing ? 'loading' : ''}`}
+                onClick={fetchFollowingList}
+                disabled={isFetchingFollowing || tiktokState.isRunning}
+              >
+                {isFetchingFollowing ? 'Fetching...' : 'Fetch Following'}
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={handleClearFollowingList}
+                disabled={isFetchingFollowing || tiktokState.isRunning || followingList.count === 0}
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="text-xs opacity-50">
+              Navigate to your TikTok profile page, then click "Fetch Following" to cache your following list for faster skip checks.
+            </div>
           </div>
         </div>
       </div>

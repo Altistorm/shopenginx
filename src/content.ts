@@ -2218,6 +2218,154 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       break;
 
+    case 'TIKTOK_OPEN_FOLLOWING_MODAL':
+      try {
+        // Click the Following count to open modal
+        const followingLink = document.querySelector('[data-e2e="following-count"]');
+        if (followingLink) {
+          (followingLink as HTMLElement).click();
+          console.log('[TIKTOK_OPEN_FOLLOWING_MODAL] Clicked following count');
+          sendResponse({ success: true });
+        } else {
+          console.log('[TIKTOK_OPEN_FOLLOWING_MODAL] Following link not found');
+          sendResponse({ success: false, error: 'Following link not found' });
+        }
+      } catch (e) {
+        console.log('[TIKTOK_OPEN_FOLLOWING_MODAL] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_CHECK_FOLLOWING_MODAL_OPEN':
+      try {
+        // Check if following modal is open by looking for role="dialog" with user links
+        // TikTok uses role="dialog" attribute, not <dialog> HTML tag
+        const checkDialogs = document.querySelectorAll('[role="dialog"]');
+        let isOpen = false;
+
+        for (const dialog of checkDialogs) {
+          // Look for the dialog that contains user profile links (following modal has many)
+          if (dialog.querySelectorAll('a[href*="/@"]').length > 10) {
+            isOpen = true;
+            break;
+          }
+        }
+
+        console.log('[TIKTOK_CHECK_FOLLOWING_MODAL_OPEN] Modal open:', isOpen);
+        sendResponse({ success: true, isOpen });
+      } catch (e) {
+        console.log('[TIKTOK_CHECK_FOLLOWING_MODAL_OPEN] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_EXTRACT_FOLLOWING_LIST':
+      (async () => {
+        try {
+          console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] Starting extraction...');
+          const userIdSet = new Set<string>(); // Use Set for faster lookups
+          let lastCount = 0;
+          let noNewItemsCount = 0;
+          const maxNoNewItems = 8; // More attempts for lazy loading
+
+          // Helper to send progress updates to popup
+          const sendProgress = (count: number) => {
+            chrome.runtime.sendMessage({
+              type: 'TIKTOK_FOLLOWING_PROGRESS',
+              count
+            }).catch(() => {}); // Ignore if popup closed
+          };
+
+          // Find the scrollable container directly by class name (more reliable)
+          const scrollContainer = document.querySelector('[class*="DivUserListContainer"]') as HTMLElement;
+
+          if (!scrollContainer) {
+            // Fallback: find via role="dialog"
+            const dialogs = document.querySelectorAll('[role="dialog"]');
+            let found = false;
+            for (const dialog of dialogs) {
+              if (dialog.querySelectorAll('a[href*="/@"]').length > 10) {
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] Modal not found');
+              sendResponse({ success: false, error: 'Following modal not found' });
+              return;
+            }
+          }
+
+          console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] Found scroll container');
+
+          // Extract function - gets user IDs from currently visible items
+          const extractVisibleUserIds = (): void => {
+            const userLinks = scrollContainer.querySelectorAll('a[href*="/@"]');
+            userLinks.forEach((link) => {
+              const href = (link as HTMLAnchorElement).href;
+              const match = href.match(/@([^/?]+)/);
+              if (match && match[1]) {
+                userIdSet.add(match[1]);
+              }
+            });
+          };
+
+          // Reset scroll to top
+          scrollContainer.scrollTop = 0;
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          // Initial extraction
+          extractVisibleUserIds();
+          lastCount = userIdSet.size;
+          sendProgress(lastCount);
+          console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] Initial count:', lastCount);
+
+          // Scroll incrementally and extract at each step (TikTok uses virtualized list)
+          while (noNewItemsCount < maxNoNewItems) {
+            // Scroll to bottom to trigger lazy load
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+            await new Promise(resolve => setTimeout(resolve, 600));
+
+            // Extract newly loaded items
+            extractVisibleUserIds();
+
+            if (userIdSet.size === lastCount) {
+              noNewItemsCount++;
+              console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] No new items, attempt:', noNewItemsCount);
+            } else {
+              noNewItemsCount = 0;
+              lastCount = userIdSet.size;
+              sendProgress(lastCount);
+              console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] New count:', lastCount);
+            }
+          }
+
+          const userIds = Array.from(userIdSet);
+          console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] Extraction complete, total:', userIds.length);
+          sendResponse({
+            success: true,
+            userIds,
+            count: userIds.length
+          });
+        } catch (e) {
+          console.log('[TIKTOK_EXTRACT_FOLLOWING_LIST] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true; // Keep channel open for async
+
+    case 'TIKTOK_CLOSE_MODAL':
+      try {
+        // Close any open modal by pressing Escape or clicking backdrop
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        console.log('[TIKTOK_CLOSE_MODAL] Sent Escape key');
+        sendResponse({ success: true });
+      } catch (e) {
+        console.log('[TIKTOK_CLOSE_MODAL] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
     default:
       sendResponse({ success: false, error: 'Unknown message type' });
   }
