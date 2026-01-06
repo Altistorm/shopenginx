@@ -43,7 +43,7 @@ export const DEFAULT_CONFIG: TikTokConfig = {
   skipThreshold: 40,
   cycleThreshold: 3,
   urls: [
-    'https://www.tiktok.com/search?q=%E0%B9%81%E0%B8%A5%E0%B8%81%E0%B8%9F%E0%B8%AD%E0%B8%A5&t=1766902207982',
+    'https://www.tiktok.com/search/user?q=%E0%B9%81%E0%B8%A5%E0%B8%81%E0%B8%9F%E0%B8%AD%E0%B8%A5&t=1766902207982',
     'https://www.tiktok.com/search/user?q=%E0%B8%9F%E0%B8%AD%E0%B8%A5%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1766902855595',
     'https://www.tiktok.com/search/user?q=%E0%B9%83%E0%B8%88%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1766979267915',
     'https://www.tiktok.com/search/user?q=%E0%B8%95%E0%B8%B2%E0%B8%A1%E0%B8%81%E0%B8%A5%E0%B8%B1%E0%B8%9A&t=1767004816761',
@@ -194,6 +194,123 @@ export async function waitForPageReady(tabId: number, maxAttempts = 30): Promise
     await sleep(1)
   }
   return false
+}
+
+// Wait for profile page to be ready (NEW layout)
+export async function waitForProfilePageReady(tabId: number, maxAttempts = 15): Promise<boolean> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const response = await sendToContent(tabId, { type: 'TIKTOK_CHECK_PROFILE_PAGE_READY' })
+    if (response.success && response.ready) {
+      return true
+    }
+    await sleep(0.5)
+  }
+  return false
+}
+
+// Follow user via profile page navigation (NEW layout workflow)
+// Opens profile in NEW TAB, follows, closes tab, returns to search tab
+export async function followViaProfilePage(
+  tabId: number,
+  profileUrl: string,
+  _searchUrl: string
+): Promise<{ success: boolean; action?: string; error?: string }> {
+  let profileTabId: number | null = null
+
+  try {
+    console.log('[TikTok] followViaProfilePage - Opening profile in new tab:', profileUrl)
+
+    // Create new tab for profile - MUST be active for content script to run properly
+    const profileTab = await chrome.tabs.create({
+      url: profileUrl,
+      active: true
+    })
+    profileTabId = profileTab.id || null
+
+    if (!profileTabId) {
+      return { success: false, error: 'Failed to create profile tab' }
+    }
+
+    console.log('[TikTok] followViaProfilePage - Created profile tab:', profileTabId)
+
+    // Wait for tab to complete loading
+    await new Promise<void>((resolve) => {
+      const checkTab = setInterval(async () => {
+        try {
+          const tab = await chrome.tabs.get(profileTabId!)
+          if (tab.status === 'complete') {
+            clearInterval(checkTab)
+            resolve()
+          }
+        } catch {
+          clearInterval(checkTab)
+          resolve()
+        }
+      }, 500)
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        clearInterval(checkTab)
+        resolve()
+      }, 10000)
+    })
+
+    // Additional wait for content script injection and DOM rendering
+    await sleep(2)
+
+    // Wait for profile page to be ready with follow button (with retries)
+    let ready = await waitForProfilePageReady(profileTabId)
+    console.log('[TikTok] followViaProfilePage - Profile page ready (attempt 1):', ready)
+
+    if (!ready) {
+      console.log('[TikTok] followViaProfilePage - Retrying...')
+      await sleep(2)
+      ready = await waitForProfilePageReady(profileTabId)
+      console.log('[TikTok] followViaProfilePage - Profile page ready (attempt 2):', ready)
+    }
+
+    if (!ready) {
+      console.log('[TikTok] followViaProfilePage - Profile page did not load after retries')
+      await chrome.tabs.remove(profileTabId)
+      return { success: false, error: 'Profile page did not load' }
+    }
+
+    // Click follow button on profile tab
+    const result = await sendToContent(profileTabId, { type: 'TIKTOK_PROFILE_CLICK_FOLLOW' })
+    console.log('[TikTok] followViaProfilePage - Follow result:', result)
+
+    // Wait for action to register
+    await sleep(1)
+
+    // Close the profile tab
+    console.log('[TikTok] followViaProfilePage - Closing profile tab')
+    await chrome.tabs.remove(profileTabId)
+    profileTabId = null
+
+    // Focus back on search tab
+    await chrome.tabs.update(tabId, { active: true })
+
+    return result
+  } catch (e) {
+    console.log('[TikTok] followViaProfilePage - Error:', e)
+
+    // Clean up: close profile tab if still open
+    if (profileTabId) {
+      try {
+        await chrome.tabs.remove(profileTabId)
+      } catch {
+        // Tab might already be closed
+      }
+    }
+
+    // Focus back on search tab
+    try {
+      await chrome.tabs.update(tabId, { active: true })
+    } catch {
+      // Ignore
+    }
+
+    return { success: false, error: String(e) }
+  }
 }
 
 // Main workflow class
@@ -397,6 +514,7 @@ export class TikTokFollowWorkflow {
       }
 
       // Check if we need to reload URL
+      console.log('[TikTok] Skip check:', this.state.skipCount, '>=', this.config.skipThreshold, '?', this.state.skipCount >= this.config.skipThreshold, 'types:', typeof this.state.skipCount, typeof this.config.skipThreshold)
       if (this.state.skipCount >= this.config.skipThreshold) {
         console.log('[TikTok] TRIGGER: skipCount >= skipThreshold, reloading page')
         this.updateState({
@@ -421,9 +539,13 @@ export class TikTokFollowWorkflow {
       // Get profiles from page
       this.updateState({ status: 'Scanning profiles...' })
       const profilesResult = await sendToContent(this.tabId!, { type: 'TIKTOK_GET_PROFILES' })
+      const isNewLayout = profilesResult.isNewLayout || false
+      const searchUrl = this.config.urls[this.state.currentUrlIndex]
+
       console.log('[TikTok] GET_PROFILES result:', {
         success: profilesResult.success,
         profileCount: profilesResult.profiles?.length || 0,
+        isNewLayout,
         error: profilesResult.error
       })
 
@@ -438,7 +560,7 @@ export class TikTokFollowWorkflow {
 
       // Process each profile
       let foundNewProfile = false
-      console.log('[TikTok] Processing', profilesResult.profiles.length, 'profiles')
+      console.log('[TikTok] Processing', profilesResult.profiles.length, 'profiles, isNewLayout:', isNewLayout)
 
       for (const profile of profilesResult.profiles) {
         this.checkAborted()
@@ -454,7 +576,9 @@ export class TikTokFollowWorkflow {
           id: profile.id,
           name: profile.name,
           followerText: profile.followerText,
-          isFollowing: profile.isFollowing
+          isFollowing: profile.isFollowing,
+          isNewLayout: profile.isNewLayout,
+          profileUrl: profile.profileUrl?.substring(0, 50)
         })
 
         this.updateState({
@@ -462,14 +586,19 @@ export class TikTokFollowWorkflow {
           status: `Checking: ${profile.name.substring(0, 20)}...`
         })
 
-        // Check if already following - ONLY this counts towards skipCount threshold
-        if (profile.isFollowing) {
+        // Check if already following - ONLY for OLD layout (new layout can't determine from search)
+        if (!isNewLayout && profile.isFollowing) {
           const newSkipCount = this.state.skipCount + 1
           console.log(`[TikTok] SKIP: already following (skipCount: ${newSkipCount}/${this.config.skipThreshold})`)
           this.updateState({
             skipCount: newSkipCount,
             status: `Skipped (already following): ${profile.name.substring(0, 15)}...`
           })
+          // Break out of for loop if threshold reached - let while loop handle reload
+          if (newSkipCount >= this.config.skipThreshold) {
+            console.log('[TikTok] Skip threshold reached inside for loop, breaking out')
+            break
+          }
           continue
         }
 
@@ -484,9 +613,10 @@ export class TikTokFollowWorkflow {
           continue
         }
 
-        // Check keywords - does NOT count towards skipCount
-        if (!nameContainsKeyword(profile.name, this.config.keywords)) {
-          console.log('[TikTok] SKIP: no keyword match in name (no threshold count)')
+        // Check keywords - use searchableText (nickname + bio) for new layout
+        const textToCheck = profile.searchableText || profile.name
+        if (!nameContainsKeyword(textToCheck, this.config.keywords)) {
+          console.log('[TikTok] SKIP: no keyword match in searchableText (no threshold count)')
           this.updateState({
             status: `Skipped (no keyword): ${profile.name.substring(0, 15)}...`
           })
@@ -494,36 +624,81 @@ export class TikTokFollowWorkflow {
         }
 
         // All criteria passed - follow!
-        console.log('[TikTok] MATCH! Clicking follow for:', profile.name)
-        this.updateState({ status: `Following: ${profile.name.substring(0, 20)}...` })
-        const followResult = await sendToContent(this.tabId!, {
-          type: 'TIKTOK_CLICK_FOLLOW',
-          profileId: profile.id
-        })
-        console.log('[TikTok] Follow click result:', followResult)
+        console.log('[TikTok] MATCH! Following:', profile.name, 'isNewLayout:', isNewLayout)
 
-        if (followResult.success) {
-          this.updateState({
-            followCount: this.state.followCount + 1,
-            status: `Followed: ${profile.name.substring(0, 20)}`
-          })
+        if (isNewLayout && profile.profileUrl) {
+          // NEW LAYOUT: Navigate to profile page to follow
+          this.updateState({ status: `Opening: ${profile.name.substring(0, 15)}...` })
 
-          // Wait a moment for any toast notification to appear
-          await sleep(0.5)
+          const followResult = await followViaProfilePage(this.tabId!, profile.profileUrl, searchUrl)
+          console.log('[TikTok] Profile page follow result:', followResult)
 
-          // Check for rate limit message
-          const rateLimitResult = await sendToContent(this.tabId!, { type: 'TIKTOK_CHECK_RATE_LIMIT' })
-          if (rateLimitResult.rateLimited) {
-            await this.handleRateLimit()
-            return
+          if (followResult.action === 'already_following') {
+            // Discovered already following on profile page
+            const newSkipCount = this.state.skipCount + 1
+            console.log(`[TikTok] Already following (discovered on profile) - skipCount: ${newSkipCount}/${this.config.skipThreshold}`)
+            this.updateState({
+              skipCount: newSkipCount,
+              status: `Already following: ${profile.name.substring(0, 15)}...`
+            })
+            // Break out of for loop if threshold reached - let while loop handle reload
+            if (newSkipCount >= this.config.skipThreshold) {
+              console.log('[TikTok] Skip threshold reached inside for loop, breaking out')
+              break
+            }
+          } else if (followResult.success && followResult.action === 'followed') {
+            this.updateState({
+              followCount: this.state.followCount + 1,
+              status: `Followed: ${profile.name.substring(0, 20)}`
+            })
+
+            // Check for rate limit after follow
+            await sleep(0.5)
+            const rateLimitResult = await sendToContent(this.tabId!, { type: 'TIKTOK_CHECK_RATE_LIMIT' })
+            if (rateLimitResult.rateLimited) {
+              await this.handleRateLimit()
+              return
+            }
+
+            // Random delay after follow
+            const delay = randomDelay(this.config.minDelay, this.config.maxDelay)
+            this.updateState({ status: `Waiting ${delay.toFixed(1)}s...` })
+            await sleep(delay)
+          } else {
+            console.warn('[TikTok] Failed to follow via profile:', followResult.error)
           }
-
-          // Random delay after follow
-          const delay = randomDelay(this.config.minDelay, this.config.maxDelay)
-          this.updateState({ status: `Waiting ${delay.toFixed(1)}s...` })
-          await sleep(delay)
         } else {
-          console.warn('Failed to follow:', followResult.error)
+          // OLD LAYOUT: Click follow directly on search page
+          this.updateState({ status: `Following: ${profile.name.substring(0, 20)}...` })
+          const followResult = await sendToContent(this.tabId!, {
+            type: 'TIKTOK_CLICK_FOLLOW',
+            profileId: profile.id
+          })
+          console.log('[TikTok] Follow click result:', followResult)
+
+          if (followResult.success) {
+            this.updateState({
+              followCount: this.state.followCount + 1,
+              status: `Followed: ${profile.name.substring(0, 20)}`
+            })
+
+            // Wait a moment for any toast notification to appear
+            await sleep(0.5)
+
+            // Check for rate limit message
+            const rateLimitResult = await sendToContent(this.tabId!, { type: 'TIKTOK_CHECK_RATE_LIMIT' })
+            if (rateLimitResult.rateLimited) {
+              await this.handleRateLimit()
+              return
+            }
+
+            // Random delay after follow
+            const delay = randomDelay(this.config.minDelay, this.config.maxDelay)
+            this.updateState({ status: `Waiting ${delay.toFixed(1)}s...` })
+            await sleep(delay)
+          } else {
+            console.warn('Failed to follow:', followResult.error)
+          }
         }
       }
 

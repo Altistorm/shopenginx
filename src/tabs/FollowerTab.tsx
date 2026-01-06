@@ -189,32 +189,34 @@ function UrlListModal({
 
         <div className="space-y-2 mb-4 max-h-60 overflow-y-auto">
           {localUrls.map((url, index) => (
-            <div key={index} className="flex items-center gap-2 bg-base-200 p-2 rounded">
-              <span className="badge badge-sm">{index + 1}</span>
-              <span className="text-xs flex-1 truncate" title={decodeUrlForDisplay(url)}>
-                {url}
-              </span>
-              <div className="flex gap-1">
-                <button
-                  className="btn btn-ghost btn-xs"
-                  onClick={() => moveUp(index)}
-                  disabled={index === 0}
-                >
-                  ↑
-                </button>
-                <button
-                  className="btn btn-ghost btn-xs"
-                  onClick={() => moveDown(index)}
-                  disabled={index === localUrls.length - 1}
-                >
-                  ↓
-                </button>
-                <button
-                  className="btn btn-ghost btn-xs text-error"
-                  onClick={() => removeUrl(index)}
-                >
-                  ×
-                </button>
+            <div key={index} className="bg-base-200 p-2 rounded">
+              <div className="flex items-start gap-2">
+                <span className="badge badge-sm flex-shrink-0">{index + 1}</span>
+                <span className="text-xs flex-1 break-all select-text">
+                  {decodeUrlForDisplay(url)}
+                </span>
+                <div className="flex gap-1 flex-shrink-0">
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    onClick={() => moveUp(index)}
+                    disabled={index === 0}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    onClick={() => moveDown(index)}
+                    disabled={index === localUrls.length - 1}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-xs text-error"
+                    onClick={() => removeUrl(index)}
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
             </div>
           ))}

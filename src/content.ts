@@ -1900,44 +1900,97 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           username: string;
           followerText: string;
           isFollowing: boolean;
+          hasFollowButton: boolean;
+          profileUrl: string;
+          searchableText: string;
           index: number;
+          isNewLayout: boolean;
         }> = [];
 
-        // Find user cards - TikTok search uses DivSearchUserItemContainer
-        const userContainers = document.querySelectorAll('[class*="DivSearchUserItemContainer"]');
+        // Try NEW selector first (data-e2e based), fallback to OLD (class based)
+        let userContainers = document.querySelectorAll('[data-e2e="search-user-container"]');
+        const isNewLayout = userContainers.length > 0;
 
-        console.log('[TIKTOK_GET_PROFILES] Found', userContainers.length, 'user cards');
+        if (!isNewLayout) {
+          userContainers = document.querySelectorAll('[class*="DivSearchUserItemContainer"]');
+        }
+
+        console.log('[TIKTOK_GET_PROFILES] Found', userContainers.length, 'user cards, isNewLayout:', isNewLayout);
 
         userContainers.forEach((container, index) => {
           try {
-            // Parse text content - format: "displayName\n\nusername\n\nXXX\n\nFollowers..."
-            const textContent = (container as HTMLElement).innerText || '';
-            const parts = textContent.split('\n').filter(t => t.trim());
+            if (isNewLayout) {
+              // NEW LAYOUT: Use data-e2e attributes
+              const uniqueIdEl = container.querySelector('[data-e2e="search-user-unique-id"]');
+              const nicknameEl = container.querySelector('[data-e2e="search-user-nickname"]');
+              const followerEl = container.querySelector('[data-e2e="search-follow-count"]');
 
-            // parts[0] = display name, parts[1] = username, parts[2] = follower count
-            const name = parts[0] || '';
-            const username = parts[1] || '';
-            const followerText = parts[2] || '0';
+              const uniqueId = uniqueIdEl?.textContent?.trim() || '';
+              const nickname = nicknameEl?.textContent?.trim() || '';
+              const followerText = followerEl?.textContent?.trim() || '0';
 
-            // Get button and check its state
-            const btn = container.querySelector('button');
-            const btnText = btn?.textContent?.trim().toLowerCase() || '';
+              // Get bio from innerText (text after follower count line)
+              const innerText = (container as HTMLElement).innerText || '';
+              const lines = innerText.split('\n').filter(t => t.trim());
+              // Lines format: [username, nickname, followers, ...bio lines]
+              const bioText = lines.length > 3 ? lines.slice(3).join(' ') : '';
 
-            // "follow" = not following, "following"/"friends" = already following
-            const isFollowing = btnText === 'following' || btnText === 'friends' || btnText === 'requested';
-            const hasFollowButton = btnText === 'follow' || isFollowing;
+              // Get profile URL from link
+              const profileLink = container.querySelector('a');
+              const profileUrl = profileLink?.href || '';
 
-            console.log('[TIKTOK_GET_PROFILES] Card', index, ':', { name, username, followerText, btnText, isFollowing });
+              // Combined text for keyword matching (nickname + bio)
+              const searchableText = `${nickname} ${bioText}`;
 
-            if (hasFollowButton && username) {
-              profiles.push({
-                id: `profile_${index}_${username}`,
-                name,
-                username,
-                followerText,
-                isFollowing,
-                index
-              });
+              console.log('[TIKTOK_GET_PROFILES] NEW Card', index, ':', { uniqueId, nickname, followerText, bioText: bioText.substring(0, 50) });
+
+              if (uniqueId) {
+                profiles.push({
+                  id: `profile_${index}_${uniqueId}`,
+                  name: nickname,              // Display name for keyword matching
+                  username: uniqueId,          // Unique ID for tracking
+                  followerText,
+                  isFollowing: false,          // Unknown in new layout - check on profile page
+                  hasFollowButton: false,      // No buttons in new layout
+                  profileUrl,
+                  searchableText,
+                  index,
+                  isNewLayout: true
+                });
+              }
+            } else {
+              // OLD LAYOUT: Keep existing logic for backward compatibility
+              const textContent = (container as HTMLElement).innerText || '';
+              const parts = textContent.split('\n').filter(t => t.trim());
+
+              const name = parts[0] || '';
+              const username = parts[1] || '';
+              const followerText = parts[2] || '0';
+
+              // Get button and check its state
+              const btn = container.querySelector('button');
+              const btnText = btn?.textContent?.trim().toLowerCase() || '';
+
+              // "follow" = not following, "following"/"friends" = already following
+              const isFollowing = btnText === 'following' || btnText === 'friends' || btnText === 'requested';
+              const hasFollowButton = btnText === 'follow' || isFollowing;
+
+              console.log('[TIKTOK_GET_PROFILES] OLD Card', index, ':', { name, username, followerText, btnText, isFollowing });
+
+              if (hasFollowButton && username) {
+                profiles.push({
+                  id: `profile_${index}_${username}`,
+                  name,
+                  username,
+                  followerText,
+                  isFollowing,
+                  hasFollowButton: true,
+                  profileUrl: '',
+                  searchableText: name,
+                  index,
+                  isNewLayout: false
+                });
+              }
             }
           } catch (err) {
             console.warn('[TIKTOK_GET_PROFILES] Error parsing profile:', err);
@@ -1945,7 +1998,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         });
 
         console.log('[TIKTOK_GET_PROFILES] Parsed', profiles.length, 'profiles');
-        sendResponse({ success: true, profiles });
+        sendResponse({ success: true, profiles, isNewLayout });
       } catch (e) {
         console.log('[TIKTOK_GET_PROFILES] Error:', e);
         sendResponse({ success: false, error: String(e) });
@@ -2113,6 +2166,54 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ success: true });
       } catch (e) {
         console.log('[TIKTOK_UPDATE_RATE_LIMIT_PHRASES] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_CHECK_PROFILE_PAGE_READY':
+      try {
+        // Check if profile page is loaded by looking for follow button or user info
+        const hasFollowButton = document.querySelector('[data-e2e="follow-button"]') !== null;
+        const hasUserInfo = document.querySelector('[data-e2e="user-subtitle"]') !== null ||
+                           document.querySelector('[data-e2e="user-bio"]') !== null ||
+                           document.querySelector('[data-e2e="followers-count"]') !== null;
+        const ready = hasFollowButton || hasUserInfo;
+
+        console.log('[TIKTOK_CHECK_PROFILE_PAGE_READY]', { hasFollowButton, hasUserInfo, ready });
+        sendResponse({ success: true, ready, hasFollowButton });
+      } catch (e) {
+        console.log('[TIKTOK_CHECK_PROFILE_PAGE_READY] Error:', e);
+        sendResponse({ success: false, error: String(e) });
+      }
+      break;
+
+    case 'TIKTOK_PROFILE_CLICK_FOLLOW':
+      try {
+        // Find follow button on profile page
+        const followBtn = document.querySelector('[data-e2e="follow-button"]');
+
+        if (!followBtn) {
+          console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Follow button not found');
+          sendResponse({ success: false, error: 'Follow button not found on profile' });
+          return;
+        }
+
+        const btnText = followBtn.textContent?.trim().toLowerCase() || '';
+        console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Button text:', btnText);
+
+        if (btnText === 'follow') {
+          (followBtn as HTMLElement).click();
+          console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Clicked follow button');
+          sendResponse({ success: true, action: 'followed' });
+        } else if (btnText === 'following' || btnText === 'friends') {
+          console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Already following:', btnText);
+          sendResponse({ success: true, action: 'already_following', status: btnText });
+        } else {
+          console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Unknown button state:', btnText);
+          sendResponse({ success: false, error: `Unknown button state: ${btnText}` });
+        }
+      } catch (e) {
+        console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Error:', e);
         sendResponse({ success: false, error: String(e) });
       }
       break;
