@@ -2205,8 +2205,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           (followBtn as HTMLElement).click();
           console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Clicked follow button');
           sendResponse({ success: true, action: 'followed' });
-        } else if (btnText === 'following' || btnText === 'friends') {
-          console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Already following:', btnText);
+        } else if (btnText === 'following' || btnText === 'friends' || btnText === 'requested') {
+          console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Already following/requested:', btnText);
           sendResponse({ success: true, action: 'already_following', status: btnText });
         } else {
           console.log('[TIKTOK_PROFILE_CLICK_FOLLOW] Unknown button state:', btnText);

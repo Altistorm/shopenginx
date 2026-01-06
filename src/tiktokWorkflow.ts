@@ -168,6 +168,12 @@ export async function addToFollowingList(userId: string): Promise<void> {
       current.lastUpdated = Date.now()
       saveFollowingList(current)
       console.log('[TikTok] Added user to following list:', userId, 'Total:', current.count)
+
+      // Send real-time update to UI
+      chrome.runtime.sendMessage({
+        type: 'TIKTOK_FOLLOWING_LIST_UPDATED',
+        count: current.count
+      }).catch(() => {}) // Ignore if popup closed
     }
   } catch (e) {
     console.error('Failed to add to following list:', e)
@@ -717,9 +723,12 @@ export class TikTokFollowWorkflow {
           console.log('[TikTok] Profile page follow result:', followResult)
 
           if (followResult.action === 'already_following') {
-            // Discovered already following on profile page
+            // Discovered already following on profile page - add to following list for future pre-skip
+            this.followingUserIds.add(profile.username)
+            addToFollowingList(profile.username)
+
             const newSkipCount = this.state.skipCount + 1
-            console.log(`[TikTok] Already following (discovered on profile) - skipCount: ${newSkipCount}/${this.config.skipThreshold}`)
+            console.log(`[TikTok] Already following (discovered on profile) - added to list, skipCount: ${newSkipCount}/${this.config.skipThreshold}`)
             this.updateState({
               skipCount: newSkipCount,
               status: `Already following: ${profile.name.substring(0, 15)}...`

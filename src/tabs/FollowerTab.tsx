@@ -301,6 +301,21 @@ function FollowerTab() {
     return () => chrome.runtime.onMessage.removeListener(handleMessage)
   }, [])
 
+  // Listen for following list storage changes (real-time updates when users are added)
+  useEffect(() => {
+    const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
+      if (area === 'local' && changes['tiktok_following_list']) {
+        const newValue = changes['tiktok_following_list'].newValue as FollowingListData | undefined
+        if (newValue) {
+          console.log('[FollowerTab] Following list storage changed:', newValue.count)
+          setFollowingList(newValue)
+        }
+      }
+    }
+    chrome.storage.onChanged.addListener(handleStorageChange)
+    return () => chrome.storage.onChanged.removeListener(handleStorageChange)
+  }, [])
+
   // Update config handler
   const updateConfig = useCallback((updates: Partial<TikTokConfig>) => {
     setTiktokConfig(prev => {
