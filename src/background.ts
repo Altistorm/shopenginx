@@ -182,6 +182,153 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ active: pollingSessions.has(tabId) });
     return true;
   }
+
+  // Download image from URL
+  if (message.action === 'downloadImage') {
+    const { url, filename, subfolder } = message;
+    
+    (async () => {
+      try {
+        console.log('[Background] Downloading image:', { url: url.substring(0, 60), filename, subfolder });
+        
+        // Fetch the image
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch image: ${response.status}`);
+        }
+        
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        
+        // Build filename with optional subfolder
+        const fullFilename = subfolder ? `${subfolder}/${filename}` : filename;
+        
+        // Download using chrome.downloads API
+        const downloadId = await chrome.downloads.download({
+          url: blobUrl,
+          filename: fullFilename,
+          saveAs: false, // Don't show save dialog
+        });
+        
+        console.log('[Background] Download started:', { downloadId, filename: fullFilename });
+        
+        // Clean up blob URL after download starts
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        
+        sendResponse({ success: true, downloadId });
+      } catch (error) {
+        console.error('[Background] Download error:', error);
+        sendResponse({ success: false, error: String(error) });
+      }
+    })();
+    
+    return true; // Keep message channel open for async response
+  }
+
+  // Batch download multiple images
+  if (message.action === 'downloadImages') {
+    const { images, subfolder } = message as { 
+      images: Array<{ url: string; filename: string }>; 
+      subfolder?: string;
+    };
+    
+    (async () => {
+      try {
+        console.log('[Background] Batch downloading', images.length, 'images');
+        
+        const results: Array<{ filename: string; success: boolean; error?: string; downloadId?: number }> = [];
+        
+        for (const img of images) {
+          try {
+            const response = await fetch(img.url);
+            if (!response.ok) {
+              results.push({ filename: img.filename, success: false, error: `HTTP ${response.status}` });
+              continue;
+            }
+            
+            const blob = await response.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            
+            const fullFilename = subfolder ? `${subfolder}/${img.filename}` : img.filename;
+            
+            const downloadId = await chrome.downloads.download({
+              url: blobUrl,
+              filename: fullFilename,
+              saveAs: false,
+            });
+            
+            // Clean up blob URL
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+            
+            results.push({ filename: img.filename, success: true, downloadId });
+            
+            // Small delay between downloads to avoid overwhelming
+            await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (err) {
+            results.push({ filename: img.filename, success: false, error: String(err) });
+          }
+        }
+        
+        const successCount = results.filter(r => r.success).length;
+        console.log('[Background] Batch download complete:', successCount, '/', images.length, 'succeeded');
+        
+        sendResponse({ success: true, results, successCount, totalCount: images.length });
+      } catch (error) {
+        console.error('[Background] Batch download error:', error);
+        sendResponse({ success: false, error: String(error) });
+      }
+    })();
+    
+    return true;
+  }
+
+  // Batch download images from data URLs (content script already fetched the images)
+  if (message.action === 'downloadImagesFromDataUrls') {
+    const { images, subfolder } = message as { 
+      images: Array<{ dataUrl: string; filename: string }>; 
+      subfolder?: string;
+    };
+    
+    (async () => {
+      try {
+        console.log('[Background] Downloading', images.length, 'images from data URLs');
+        
+        const results: Array<{ filename: string; success: boolean; error?: string; downloadId?: number }> = [];
+        
+        for (const img of images) {
+          try {
+            const fullFilename = subfolder ? `${subfolder}/${img.filename}` : img.filename;
+            
+            // Data URLs can be used directly with chrome.downloads
+            const downloadId = await chrome.downloads.download({
+              url: img.dataUrl,
+              filename: fullFilename,
+              saveAs: false,
+            });
+            
+            console.log('[Background] Download started:', { downloadId, filename: fullFilename });
+            results.push({ filename: img.filename, success: true, downloadId });
+            
+            // Small delay between downloads
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } catch (err) {
+            console.error('[Background] Download error for', img.filename, ':', err);
+            results.push({ filename: img.filename, success: false, error: String(err) });
+          }
+        }
+        
+        const successCount = results.filter(r => r.success).length;
+        console.log('[Background] Batch download complete:', successCount, '/', images.length, 'succeeded');
+        
+        sendResponse({ success: true, results, successCount, totalCount: images.length });
+      } catch (error) {
+        console.error('[Background] Batch download error:', error);
+        sendResponse({ success: false, error: String(error) });
+      }
+    })();
+    
+    return true;
+  }
 })
 
 console.log('ShopEnginX background service worker loaded')

@@ -1,7 +1,15 @@
-import { useState } from 'react'
-import { workflowManager } from '../workflow'
-import { ImageFlowContext } from '../flowWorkflow'
-import '../flowWorkflow' // Register workflow
+import { useState, useEffect } from 'react'
+
+// Progress event type from content script
+interface ImageProgressEvent {
+  step: string
+  attempt: number
+  maxAttempts: number
+  status: 'running' | 'success' | 'retrying' | 'failed'
+  setIndex?: number
+  totalSets?: number
+  error?: string
+}
 
 interface ImageSet {
   id: string
@@ -19,28 +27,71 @@ function ImageTab() {
   const [setCount, setSetCount] = useState(2)
   const [imageSets, setImageSets] = useState<ImageSet[]>([])
   const [sharedModelImage, setSharedModelImage] = useState<string | null>(null)
-  const [aspectRatio, setAspectRatio] = useState('9:16')
+  const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16')
   const [imageCount, setImageCount] = useState(4)
   const [noTextOnImage, setNoTextOnImage] = useState(false)
   const [autoSaveImage, setAutoSaveImage] = useState(true)
-  const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('2K')
-  const [enableLoop, setEnableLoop] = useState(false)
-  const [loopCount, setLoopCount] = useState(5)
-  const [autoRunWorkflow, setAutoRunWorkflow] = useState(true)
+  const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('1K')
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
   const [isRunning, setIsRunning] = useState(false)
-  const [currentImageIndex, setCurrentImageIndex] = useState(0)
-  const [isSettingsConfigured, setIsSettingsConfigured] = useState(false)
-  const [isImageUploaded, setIsImageUploaded] = useState(false)
-  const [isPromptFilled, setIsPromptFilled] = useState(false)
-  const [isCreateClicked, setIsCreateClicked] = useState(false)
 
   const [validationError, setValidationError] = useState<string | null>(null)
+  
+  // Progress state for event-driven workflow
+  const [progress, setProgress] = useState<ImageProgressEvent | null>(null)
+  const [result, setResult] = useState<{ success: boolean; error?: string; completedSets?: number; totalSets?: number } | null>(null)
+
+  // Listen for progress updates from content script
+  useEffect(() => {
+    const handleMessage = (message: { type: string } & ImageProgressEvent) => {
+      if (message.type === 'IMAGE_PROGRESS') {
+        setProgress(message)
+      }
+    }
+
+    chrome.runtime.onMessage.addListener(handleMessage)
+    return () => chrome.runtime.onMessage.removeListener(handleMessage)
+  }, [])
+
+  // Clear result when tab updates (page refresh/navigation)
+  useEffect(() => {
+    const handleTabUpdate = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+      // When page starts loading, clear the result
+      if (changeInfo.status === 'loading') {
+        setResult(null)
+        setProgress(null)
+        setIsRunning(false)
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(handleTabUpdate)
+    return () => chrome.tabs.onUpdated.removeListener(handleTabUpdate)
+  }, [])
+
+  // Get display name for step
+  const getStepDisplayName = (step: string): string => {
+    const names: Record<string, string> = {
+      ensureCreateImageMode: 'Setting image mode',
+      configureSettings: 'Configuring settings',
+      openImagePicker: 'Opening image picker',
+      uploadImage: 'Uploading image',
+      handleCrop: 'Cropping image',
+      waitAllImagesUploaded: 'Waiting for uploads',
+      fillPrompt: 'Filling prompt',
+      clickCreate: 'Starting generation',
+      waitForGeneration: 'Generating images',
+      downloadImages: 'Downloading images',
+      clearPromptBox: 'Clearing for next set',
+    }
+    return names[step] || step
+  }
 
   const handleCreate = async () => {
     // Validation
     setValidationError(null)
+    setProgress(null)
+    setResult(null)
 
     if (multiSetMode === 'none') {
       // Single mode: require at least one image
@@ -48,8 +99,19 @@ function ImageTab() {
         setValidationError('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')
         return
       }
+    } else if (multiSetMode === 'sameModel') {
+      // sameModel mode: require model image and at least one product (not all slots need to be filled)
+      if (!sharedModelImage) {
+        setValidationError('กรุณาเพิ่มรูปนางแบบ')
+        return
+      }
+      const filledSets = imageSets.filter(set => set.product !== null)
+      if (filledSets.length === 0) {
+        setValidationError('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')
+        return
+      }
     } else {
-      // Multi-set mode: require at least one product image in each set
+      // multi mode: require at least one product image in each set
       const emptySet = imageSets.find(set => !set.product)
       if (emptySet) {
         setValidationError('กรุณาเพิ่มรูปสินค้าในทุกชุด')
@@ -59,198 +121,74 @@ function ImageTab() {
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
 
-    // Prepare images based on mode
-    let workflowImages: string[] = []
-    let productImagesArray: string[] = []
-
-    if (multiSetMode === 'sameModel' && sharedModelImage) {
-      // sameModel mode: collect all product images, workflow will iterate through sets
-      productImagesArray = imageSets.map(set => set.product).filter((p): p is string => p !== null)
-      // First round: sharedModel + first product
-      workflowImages = [sharedModelImage, productImagesArray[0]].filter((img): img is string => img !== undefined)
-      console.log(`[handleCreate] sameModel mode: ${productImagesArray.length} products, starting with set 0`)
-    } else if (multiSetMode === 'none') {
-      workflowImages = images
-    } else {
-      // multi mode (different model per set) - flatten all images
-      imageSets.forEach(set => {
-        if (set.model) workflowImages.push(set.model)
-        if (set.product) workflowImages.push(set.product)
-      })
-    }
-
-    // Create context from current state
-    const context: ImageFlowContext = {
-      images: workflowImages,
-      style,
-      productName,
-      modelType,
-      aspectRatio,
-      imageCount,
-      noTextOnImage,
-      imageText,
-      scene,
-      currentImageIndex,
-      isSettingsConfigured,
-      isImageUploaded,
-      isPromptFilled,
-      isCreateClicked,
-      autoSaveImage,
-      downloadResolution,
-      // Multi-set mode fields
-      multiSetMode,
-      currentSetIndex: 0,
-      totalSets: multiSetMode === 'sameModel' ? productImagesArray.length : undefined,
-      sharedModelImage: multiSetMode === 'sameModel' ? sharedModelImage : undefined,
-      productImages: multiSetMode === 'sameModel' ? productImagesArray : undefined,
-    }
-
-    // Set tab ID if we are on Flow
-    if (tab?.url?.startsWith('https://labs.google')) {
-      context.tabId = tab.id
+    // Check if on Google Flow
+    if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
+      setValidationError('กรุณาเปิด Google Flow ก่อน (labs.google/fx/tools/flow)')
+      return
     }
 
     setIsRunning(true)
+
     try {
-      // Get current node based on browser state
-      let currentNode = await workflowManager.getCurrentNode('image')
+      if (multiSetMode === 'sameModel' && sharedModelImage) {
+        // ==================== Event-Driven Workflow (sameModel mode) ====================
+        const productImagesArray = imageSets.map(set => set.product).filter((p): p is string => p !== null)
 
-      if (!currentNode) {
-        throw new Error('Could not determine current workflow state')
-      }
+        console.log(`[handleCreate] sameModel mode: ${productImagesArray.length} products, using event-driven workflow`)
 
-      console.log('Current node:', currentNode.id)
-      console.log('Auto Run Workflow:', autoRunWorkflow)
+        // Send message to content script to start workflow
+        const response = await chrome.tabs.sendMessage(tab.id!, {
+          type: 'START_IMAGE_WORKFLOW',
+          modelImage: sharedModelImage,
+          productImages: productImagesArray,
+          style,
+          productName,
+          aspectRatio,
+          imageCount,
+          noTextOnImage,
+          imageText,
+          scene,
+          autoSaveImage,
+          downloadResolution,
+        })
 
-      // Helper function to get action name
-      const getActionName = async (node: typeof currentNode, ctx: typeof context): Promise<string | null> => {
-        // Try to get action from node's ActionResolver (for nodes with dynamic actions)
-        let actionName = await node.determineAction(ctx)
-
-        // Fallback to switch-case for nodes without ActionResolver
-        if (!actionName) {
-          switch (node.id) {
-            case 'browser':
-              actionName = 'openFlow'
-              break
-            case 'flowHomePage':
-              actionName = 'ensureImageTabAndClickNewProject'
-              break
-            case 'projectEditorWithImages':
-              actionName = 'configureSettings'
-              break
-            case 'projectEditorConfigured':
-              actionName = 'generate'
-              break
-            case 'generating':
-              actionName = 'waitForResult'
-              break
-            default:
-              console.warn(`No automatic action for node: ${node.id}`)
-              return null
-          }
-        }
-        return actionName
-      }
-
-      if (autoRunWorkflow) {
-        // Auto Run: Loop until workflow is complete
-        let actionName = await getActionName(currentNode, context)
-        let iterationCount = 0
-        const MAX_ITERATIONS = 100 // Safety limit
-
-        while (actionName && iterationCount < MAX_ITERATIONS) {
-          iterationCount++
-          console.log(`[Auto Run] Iteration ${iterationCount}: Running action "${actionName}" on node "${currentNode.id}"`)
-
-          const nextNodeId = await currentNode.runAction(actionName, context)
-
-          // Use nextNodeId if action specifies a transition, otherwise re-detect by URL
-          if (nextNodeId) {
-            console.log(`[Auto Run] Action returned nextNodeId: "${nextNodeId}"`)
-            const nextNode = workflowManager.getNodeById('image', nextNodeId)
-            if (nextNode) {
-              currentNode = nextNode
-            } else {
-              console.warn(`[Auto Run] Node "${nextNodeId}" not found, re-detecting...`)
-              currentNode = await workflowManager.getCurrentNode('image')
-            }
-          } else {
-            // No nextNodeId means workflow complete or re-detect needed
-            console.log('[Auto Run] No nextNodeId, re-detecting current node...')
-            currentNode = await workflowManager.getCurrentNode('image')
-          }
-
-          if (!currentNode) {
-            console.log('[Auto Run] No current node detected, workflow may be complete')
-            break
-          }
-
-          // Get next action
-          actionName = await getActionName(currentNode, context)
-
-          // Small delay between actions to prevent overwhelming the browser
-          await new Promise(resolve => setTimeout(resolve, 500))
-        }
-
-        if (iterationCount >= MAX_ITERATIONS) {
-          console.warn('[Auto Run] Reached maximum iterations, stopping')
-        }
-
-        console.log(`[Auto Run] Workflow completed after ${iterationCount} iterations`)
+        setResult(response)
+        console.log('[handleCreate] Workflow result:', response)
 
       } else {
-        // Single Step: Run one action only
-        const actionName = await getActionName(currentNode, context)
-
-        if (!actionName) {
-          setIsRunning(false)
-          return
-        }
-
-        console.log('Running action:', actionName)
-        await currentNode.runAction(actionName, context)
-      }
-
-      // Sync state back to React
-      if (context.currentImageIndex !== undefined) {
-        setCurrentImageIndex(context.currentImageIndex)
-      }
-      if (context.isSettingsConfigured) {
-        setIsSettingsConfigured(true)
-      }
-      if (context.isImageUploaded) {
-        setIsImageUploaded(true)
-      }
-      if (context.isPromptFilled) {
-        setIsPromptFilled(true)
-      }
-      if (context.isCreateClicked) {
-        // Reset all state after Create is clicked for next run
-        setCurrentImageIndex(0)
-        setIsSettingsConfigured(false)
-        setIsImageUploaded(false)
-        setIsPromptFilled(false)
-        setIsCreateClicked(false)
+        // ==================== Legacy: Single mode or multi mode ====================
+        // For now, show error - these modes need migration later
+        setValidationError('โหมดนี้ยังไม่รองรับ กรุณาใช้โหมด "หลายชุดสินค้า นางแบบเดียว"')
       }
 
     } catch (error) {
       console.error('Workflow error:', error)
-      setValidationError(error instanceof Error ? error.message : 'เกิดข้อผิดพลาดในการทำงาน')
+      setResult({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
     } finally {
       setIsRunning(false)
+      setProgress(null)
     }
+  }
+
+  const handleStop = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      if (tab?.id) {
+        await chrome.tabs.sendMessage(tab.id, { type: 'STOP_IMAGE_WORKFLOW' })
+      }
+    } catch (error) {
+      console.error('Failed to stop workflow:', error)
+    }
+    setIsRunning(false)
+    setProgress(null)
   }
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files) {
-      // Reset state when new images are uploaded
-      setCurrentImageIndex(0)
-      setIsSettingsConfigured(false)
-      setIsImageUploaded(false)
-      setIsPromptFilled(false)
-      setIsCreateClicked(false)
       Array.from(files).forEach(file => {
         const reader = new FileReader()
         reader.onload = (event) => {
@@ -573,6 +511,7 @@ function ImageTab() {
             <option value="dramatic">อลังการ ดุดัน</option>
             <option value="minimalist">มินิมอล</option>
             <option value="luxury">หรูหรา</option>
+            <option value="dance">💃 เต้น K-pop</option>
           </select>
         </div>
         <div className="form-control">
@@ -616,7 +555,7 @@ function ImageTab() {
           <select
             className="select select-bordered select-sm"
             value={aspectRatio}
-            onChange={(e) => setAspectRatio(e.target.value)}
+            onChange={(e) => setAspectRatio(e.target.value as '9:16' | '16:9')}
           >
             <option value="9:16">แนวตั้ง 9:16</option>
             <option value="16:9">แนวนอน 16:9</option>
@@ -704,41 +643,50 @@ function ImageTab() {
           )}
         </div>
 
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-primary checkbox-xs"
-            checked={enableLoop}
-            onChange={(e) => setEnableLoop(e.target.checked)}
-          />
-          <span className="select-text">🔄 วนลูปสร้างรูป</span>
-        </label>
-
-        {enableLoop && (
-          <div className="ml-6 flex items-center gap-2 text-sm">
-            <span>จำนวนรอบ:</span>
-            <input
-              type="number"
-              min={2}
-              max={50}
-              className="input input-bordered input-xs w-16"
-              value={loopCount}
-              onChange={(e) => setLoopCount(parseInt(e.target.value) || 5)}
-            />
-            <span className="text-xs opacity-50">(สูงสุด 50)</span>
-          </div>
-        )}
-
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-success checkbox-xs"
-            checked={autoRunWorkflow}
-            onChange={(e) => setAutoRunWorkflow(e.target.checked)}
-          />
-          <span className="select-text">⚡ Auto Run Workflow (รันทั้งหมดอัตโนมัติ)</span>
-        </label>
       </div>
+
+      {/* Progress Display */}
+      {progress && (
+        <div className="alert alert-info py-2">
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              {progress.status === 'running' && <span className="loading loading-spinner loading-sm"></span>}
+              {progress.status === 'success' && <span>✓</span>}
+              {progress.status === 'retrying' && <span>⟳</span>}
+              {progress.status === 'failed' && <span>✗</span>}
+              <span className="font-medium text-sm">{getStepDisplayName(progress.step)}</span>
+            </div>
+            {progress.totalSets && progress.totalSets > 1 && (
+              <div className="text-xs mt-1">
+                ชุดที่ {(progress.setIndex ?? 0) + 1} / {progress.totalSets}
+              </div>
+            )}
+            {progress.status === 'retrying' && (
+              <div className="text-xs mt-1 text-warning">
+                ลองใหม่ครั้งที่ {progress.attempt} / {progress.maxAttempts}
+              </div>
+            )}
+            {progress.error && (
+              <div className="text-xs mt-1 text-error">{progress.error}</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Result Display */}
+      {result && !isRunning && (
+        <div className={`alert ${result.success ? 'alert-success' : 'alert-error'} py-2`}>
+          <div className="text-sm">
+            {result.success ? (
+              <span>สร้างรูปสำเร็จ! ({result.completedSets}/{result.totalSets} ชุด)</span>
+            ) : result.error === 'RECOVERY_REFRESH_PENDING' ? (
+              <span>กำลังรีเฟรชเพื่อตรวจสอบรูปภาพ...</span>
+            ) : (
+              <span>ล้มเหลว: {result.error}</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Validation Error */}
       {validationError && (
@@ -747,21 +695,27 @@ function ImageTab() {
         </div>
       )}
 
-      {/* Create Button */}
-      <button
-        className="btn btn-primary w-full"
-        onClick={handleCreate}
-        disabled={isRunning}
-      >
-        {isRunning ? (
-          <>
-            <span className="loading loading-spinner loading-sm"></span>
-            กำลังสร้าง...
-          </>
-        ) : (
-          '🖼️ สร้างรูปภาพ'
-        )}
-      </button>
+      {/* Action Buttons */}
+      {isRunning ? (
+        <button className="btn btn-error w-full" onClick={handleStop}>
+          หยุด
+        </button>
+      ) : (
+        <button
+          className="btn btn-primary w-full"
+          onClick={handleCreate}
+          disabled={multiSetMode !== 'sameModel'}
+        >
+          🖼️ สร้างรูปภาพ
+        </button>
+      )}
+
+      {/* Mode hint */}
+      {multiSetMode !== 'sameModel' && (
+        <div className="text-center text-xs text-base-content/50">
+          กรุณาเลือกโหมด "หลายชุดสินค้า นางแบบเดียว" เพื่อใช้งาน
+        </div>
+      )}
     </div>
   )
 }
