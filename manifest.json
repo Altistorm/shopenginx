@@ -33,7 +33,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://labs.google/*"],
+      "matches": ["*://*.google/*", "*://labs.google/*"],
       "js": ["src/content.ts"],
       "run_at": "document_idle"
     },

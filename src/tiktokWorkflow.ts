@@ -232,16 +232,19 @@ export async function sendToContent(tabId: number, message: any): Promise<any> {
 
 // Find or create TikTok tab
 export async function findOrCreateTikTokTab(url: string): Promise<number | null> {
+  // Add cache-busting param to force fresh fetch (avoids browser cache)
+  const cacheBustUrl = `${url}${url.includes('?') ? '&' : '?'}_cb=${Date.now()}`
+
   return new Promise((resolve) => {
     chrome.tabs.query({ url: 'https://www.tiktok.com/*' }, (tabs) => {
       if (tabs.length > 0 && tabs[0].id) {
         // Update existing tab with new URL
-        chrome.tabs.update(tabs[0].id, { url, active: true }, () => {
+        chrome.tabs.update(tabs[0].id, { url: cacheBustUrl, active: true }, () => {
           resolve(tabs[0].id!)
         })
       } else {
         // Create new tab
-        chrome.tabs.create({ url, active: true }, (tab) => {
+        chrome.tabs.create({ url: cacheBustUrl, active: true }, (tab) => {
           resolve(tab.id || null)
         })
       }
@@ -389,6 +392,8 @@ export class TikTokFollowWorkflow {
   private followingUserIds: Set<string> = new Set()  // Pre-loaded following list for skip check
   private keepAliveManager = getKeepAliveManager()
   private consecutiveNoResults: number = 0
+  private lastProfileBeforeScroll: string = ''  // Track last profile to detect scroll failures
+  private sameLastProfileCount: number = 0      // Count consecutive same last profile after scroll
 
   constructor(
     config: TikTokConfig,
@@ -622,6 +627,34 @@ export class TikTokFollowWorkflow {
       })
 
       if (!profilesResult.success || !profilesResult.profiles?.length) {
+        // Check if "No results found" is displayed - switch URL if so
+        const noResultsCheck = await sendToContent(this.tabId!, { type: 'TIKTOK_CHECK_NO_RESULTS' })
+        console.log('[TikTok] profileLoop - No results check:', noResultsCheck)
+
+        if (noResultsCheck.success && noResultsCheck.noResults) {
+          this.consecutiveNoResults++
+          console.log('[TikTok] profileLoop - No results found. Consecutive:', this.consecutiveNoResults, '/', this.config.urls.length)
+
+          // If all URLs have no results, trigger rate limit wait
+          if (this.consecutiveNoResults >= this.config.urls.length) {
+            console.log('[TikTok] All URLs returned no results - triggering rate limit wait...')
+            this.updateState({ status: 'All URLs empty - waiting...' })
+            this.consecutiveNoResults = 0
+            await this.handleRateLimit()
+            return
+          }
+
+          // Switch to next URL
+          this.updateState({
+            currentUrlIndex: (this.state.currentUrlIndex + 1) % this.config.urls.length,
+            status: 'No results - switching URL...'
+          })
+          this.processedProfiles.clear()
+          // Restart with new URL
+          await this.runWorkflow()
+          return
+        }
+
         // Scroll to load more
         console.log('[TikTok] No profiles found, scrolling...')
         this.updateState({ status: 'Scrolling for more...' })
@@ -804,11 +837,40 @@ export class TikTokFollowWorkflow {
 
       // If no new profiles found, scroll for more
       if (!foundNewProfile) {
+        // Get last profile before scroll
+        const lastProfile = profilesResult.profiles[profilesResult.profiles.length - 1]?.username || ''
+
+        // Check if same as before scroll
+        if (lastProfile && lastProfile === this.lastProfileBeforeScroll) {
+          this.sameLastProfileCount++
+          console.log('[TikTok] Same last profile after scroll:', lastProfile, 'count:', this.sameLastProfileCount)
+
+          // After 3 consecutive same last profile, refresh the page
+          if (this.sameLastProfileCount >= 3) {
+            console.log('[TikTok] Scroll not loading new content - refreshing page...')
+            this.updateState({ status: 'Refreshing page (scroll stuck)...' })
+            this.sameLastProfileCount = 0
+            this.lastProfileBeforeScroll = ''
+
+            // Refresh the page
+            await chrome.tabs.reload(this.tabId!)
+            await sleep(3) // Wait for page to reload
+            continue
+          }
+        } else {
+          this.sameLastProfileCount = 0
+        }
+
+        this.lastProfileBeforeScroll = lastProfile
         console.log('[TikTok] No new profiles in current batch, scrolling...')
-        console.log('[TikTok] Already processed:', this.processedProfiles.size, 'usernames')
+        console.log('[TikTok] Already processed:', this.processedProfiles.size, 'usernames, last profile:', lastProfile)
         this.updateState({ status: 'Scrolling for more profiles...' })
         await sendToContent(this.tabId!, { type: 'TIKTOK_SCROLL_FOR_MORE' })
         await sleep(3) // Wait longer for new profiles to load
+      } else {
+        // Reset scroll fail counter when new profiles found
+        this.sameLastProfileCount = 0
+        this.lastProfileBeforeScroll = ''
       }
     }
   }

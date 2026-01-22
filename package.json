@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "move": "xcopy /E /I /Y .\\dist ..\\extension\\public\\shopenginx",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -12,7 +13,7 @@
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@crxjs/vite-plugin": "^2.0.0-beta.23",
+    "@crxjs/vite-plugin": "^2.3.0",
     "@types/chrome": "^0.0.254",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",
