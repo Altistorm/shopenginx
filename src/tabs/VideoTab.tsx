@@ -11,11 +11,27 @@ interface VideoProgressEvent {
 }
 
 function VideoTab() {
+  // Dance style default prompts
+  const DANCE_INITIAL_PROMPT = `Full body shot of an attractive young woman dancing K-pop style in the front of the door of a modern living room, showing a fit midriff, confident and seductive smile, fluid body movement, sharp focus, trending on social media, realistic photography --ar 9:16`
+  const DANCE_EXTENSION_PROMPT = `continue previous scene smoothly with the same vibe and the same song.
+Full body shot of an attractive young woman dancing K-pop style in the front of the door of a modern living room, showing a fit midriff, confident and seductive smile, fluid body movement, sharp focus, trending on social media, realistic photography --ar 9:16`
+
   // Form state
   const [startFrameImage, setStartFrameImage] = useState<string | null>(null)
   const [prompts, setPrompts] = useState<string[]>([''])
+  const [style, setStyle] = useState('tiktok_real')
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16')
+  const [videoCount, setVideoCount] = useState(1)
+  const [noTextOnVideo, setNoTextOnVideo] = useState(true)
   const [autoDownload, setAutoDownload] = useState(true)
+
+  const handleStyleChange = (newStyle: string) => {
+    setStyle(newStyle)
+    if (newStyle === 'dance') {
+      // Auto-populate prompts for dance style: 1 initial + 2 extensions
+      setPrompts([DANCE_INITIAL_PROMPT, DANCE_EXTENSION_PROMPT, DANCE_EXTENSION_PROMPT])
+    }
+  }
 
   // Workflow state
   const [isRunning, setIsRunning] = useState(false)
@@ -91,7 +107,10 @@ function VideoTab() {
         type: 'START_VIDEO_WORKFLOW',
         image: startFrameImage,
         prompts: validPrompts,
+        style,
         aspectRatio,
+        videoCount,
+        noTextOnVideo,
         autoDownload,
       })
 
@@ -178,6 +197,28 @@ function VideoTab() {
         />
       </div>
 
+      {/* Style */}
+      <div className="form-control">
+        <label className="label py-1">
+          <span className="label-text select-text text-xs">🎨 สไตล์</span>
+        </label>
+        <select
+          className="select select-bordered select-sm"
+          value={style}
+          onChange={(e) => handleStyleChange(e.target.value)}
+          disabled={isRunning}
+        >
+          <option value="tiktok_real">TikTok คนธรรมดา (UGC Real)</option>
+          <option value="review">ถือสินค้ารีวิว</option>
+          <option value="hands_only">เห็นมืออย่างเดียว</option>
+          <option value="professional">มืออาชีพ</option>
+          <option value="dramatic">อลังการ ดุดัน</option>
+          <option value="minimalist">มินิมอล</option>
+          <option value="luxury">หรูหรา</option>
+          <option value="dance">💃 เต้น K-pop</option>
+        </select>
+      </div>
+
       {/* Prompts */}
       <div className="form-control">
         <label className="label">
@@ -231,10 +272,10 @@ function VideoTab() {
       </div>
 
       {/* Settings Row */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-2">
         <div className="form-control">
-          <label className="label">
-            <span className="label-text select-text">Aspect Ratio</span>
+          <label className="label py-1">
+            <span className="label-text select-text text-xs">📐 สัดส่วน</span>
           </label>
           <select
             className="select select-bordered select-sm"
@@ -242,22 +283,51 @@ function VideoTab() {
             onChange={(e) => setAspectRatio(e.target.value as '9:16' | '16:9')}
             disabled={isRunning}
           >
-            <option value="9:16">Portrait (9:16)</option>
-            <option value="16:9">Landscape (16:9)</option>
+            <option value="9:16">แนวตั้ง 9:16</option>
+            <option value="16:9">แนวนอน 16:9</option>
           </select>
         </div>
         <div className="form-control">
-          <label className="label cursor-pointer">
-            <span className="label-text select-text">Auto Download</span>
-            <input
-              type="checkbox"
-              className="toggle toggle-primary toggle-sm"
-              checked={autoDownload}
-              onChange={(e) => setAutoDownload(e.target.checked)}
-              disabled={isRunning}
-            />
+          <label className="label py-1">
+            <span className="label-text select-text text-xs">🔢 จำนวน</span>
           </label>
+          <select
+            className="select select-bordered select-sm"
+            value={videoCount}
+            onChange={(e) => setVideoCount(parseInt(e.target.value))}
+            disabled={isRunning}
+          >
+            <option value={1}>1 วิดีโอ</option>
+            <option value={2}>2 วิดีโอ</option>
+            <option value={3}>3 วิดีโอ</option>
+            <option value={4}>4 วิดีโอ</option>
+          </select>
         </div>
+      </div>
+
+      {/* Options */}
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+          <input
+            type="checkbox"
+            className="checkbox checkbox-primary checkbox-xs"
+            checked={noTextOnVideo}
+            onChange={(e) => setNoTextOnVideo(e.target.checked)}
+            disabled={isRunning}
+          />
+          <span className="select-text">🚫 ไม่ต้องมีข้อความบนวิดีโอ</span>
+        </label>
+
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+          <input
+            type="checkbox"
+            className="checkbox checkbox-primary checkbox-xs"
+            checked={autoDownload}
+            onChange={(e) => setAutoDownload(e.target.checked)}
+            disabled={isRunning}
+          />
+          <span className="select-text">💾 Auto Download วิดีโอ</span>
+        </label>
       </div>
 
       {/* Progress Display */}

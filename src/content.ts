@@ -682,6 +682,7 @@ interface VideoSetConfig {
   image?: string;              // Base64 encoded start frame image
   prompts: string[];           // prompts[0] = initial, prompts[1..N] = extensions
   aspectRatio: '9:16' | '16:9';
+  outputCount: number;         // Outputs per prompt (1-4)
   autoDownload: boolean;
 }
 
@@ -943,62 +944,120 @@ class VideoFlowController {
     await this.delay(300);
   }
 
-  /**
-   * Step: Configure settings (aspect ratio) via Settings dialog
+/**
+   * Step: Configure settings (aspect ratio + output count) via Settings dialog
    */
-  async configureSettings(aspectRatio: '9:16' | '16:9'): Promise<void> {
+  async configureSettings(aspectRatio: '9:16' | '16:9', outputCount: number): Promise<void> {
     const config = this.stepConfig['configureSettings'];
     const isPortrait = aspectRatio === '9:16';
-    const targetText = isPortrait ? 'Portrait' : 'Landscape';
+    const targetAspectText = isPortrait ? 'Portrait' : 'Landscape';
 
-    // Check if already correct
-    const currentIcon = isPortrait ? 'crop_9_16' : 'crop_16_9';
-    const iconExists = Array.from(document.querySelectorAll('*')).some(
-      el => el.textContent?.trim() === currentIcon
-    );
-    if (iconExists) {
-      console.log('[VideoFlowController] Aspect ratio already set to', aspectRatio);
-      return;
-    }
+    // Helper to get fresh dialog reference
+    const getDialog = () => document.querySelector('[role="dialog"]');
 
     // Open settings dialog
     const settingsBtn = findButtonByText('Settings');
     if (!settingsBtn) throw new Error('Settings button not found');
+    console.log('[VideoFlowController] Clicking Settings button');
     settingsBtn.click();
 
     // Wait for dialog
     await this.waitFor(
-      () => document.querySelector('[role="dialog"]') !== null,
+      () => getDialog() !== null,
       'settings dialog',
       config.timeoutMs
     );
-    await this.delay(300);
+    await this.delay(500);
+    console.log('[VideoFlowController] Settings dialog opened');
 
-    // Find and click Aspect Ratio combobox
+    // ===== Set Aspect Ratio =====
     const aspectCombobox = findByText('[role="combobox"]', 'Aspect Ratio');
-    if (!aspectCombobox) throw new Error('Aspect Ratio combobox not found');
-    aspectCombobox.click();
+    if (aspectCombobox) {
+      // Check if already correct
+      if (!aspectCombobox.textContent?.includes(targetAspectText)) {
+        console.log('[VideoFlowController] Clicking Aspect Ratio combobox');
+        aspectCombobox.click();
+        await this.delay(300);
 
-    // Wait for options
-    await this.waitFor(
-      () => document.querySelectorAll('[role="option"]').length > 0,
-      'aspect ratio options',
-      config.timeoutMs
-    );
-    await this.delay(200);
+        // Wait for options
+        await this.waitFor(
+          () => document.querySelectorAll('[role="option"]').length > 0,
+          'aspect ratio options',
+          config.timeoutMs
+        );
 
-    // Click target option
-    const targetOption = findByText('[role="option"]', targetText);
-    if (!targetOption) throw new Error(`${targetText} option not found`);
-    targetOption.click();
-    await this.delay(300);
+        const targetOption = Array.from(document.querySelectorAll('[role="option"]'))
+          .find(el => el.textContent?.includes(targetAspectText));
+        if (targetOption) {
+          console.log('[VideoFlowController] Selecting aspect ratio:', targetAspectText);
+          (targetOption as HTMLElement).click();
+          await this.delay(300);
+
+          // Wait for dropdown to close
+          await this.waitFor(
+            () => document.querySelectorAll('[role="option"]').length === 0,
+            'aspect ratio dropdown close',
+            5000
+          );
+          await this.delay(200);
+        }
+      } else {
+        console.log('[VideoFlowController] Aspect ratio already set to:', targetAspectText);
+      }
+    }
+
+    // ===== Set Output Count =====
+    const outputCombobox = findByText('[role="combobox"]', 'Outputs per prompt');
+    if (outputCombobox) {
+      // Check if already correct
+      const currentCount = outputCombobox.textContent?.match(/\d+/)?.[0];
+      if (currentCount !== String(outputCount)) {
+        console.log('[VideoFlowController] Clicking Outputs per prompt combobox, current:', currentCount);
+        outputCombobox.click();
+        await this.delay(300);
+
+        // Wait for options
+        await this.waitFor(
+          () => document.querySelectorAll('[role="option"]').length > 0,
+          'output count options',
+          config.timeoutMs
+        );
+
+        const allOptions = document.querySelectorAll('[role="option"]');
+        console.log('[VideoFlowController] Found options:', allOptions.length);
+
+        const countOption = Array.from(allOptions)
+          .find(el => el.textContent?.trim() === String(outputCount));
+        if (countOption) {
+          console.log('[VideoFlowController] Selecting output count:', outputCount);
+          (countOption as HTMLElement).click();
+          await this.delay(300);
+
+          // Wait for dropdown to close
+          await this.waitFor(
+            () => document.querySelectorAll('[role="option"]').length === 0,
+            'output count dropdown close',
+            5000
+          );
+          await this.delay(200);
+        } else {
+          console.log('[VideoFlowController] Option not found for count:', outputCount);
+        }
+      } else {
+        console.log('[VideoFlowController] Output count already set to:', outputCount);
+      }
+    } else {
+      console.log('[VideoFlowController] Outputs per prompt combobox not found');
+    }
 
     // Close dialog with Escape
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    console.log('[VideoFlowController] Closing settings dialog');
+    const escEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.dispatchEvent(escEvent);
 
     // Wait for dialog to close
     await this.waitFor(
-      () => document.querySelector('[role="dialog"]') === null,
+      () => getDialog() === null,
       'settings dialog close',
       config.timeoutMs
     );
@@ -1006,9 +1065,66 @@ class VideoFlowController {
   }
 
   /**
+   * Helper: Select aspect ratio in crop dialog
+   * Must be called when crop dialog is visible, before clicking "Crop and Save"
+   */
+  private async selectCropAspectRatio(aspectRatio: '9:16' | '16:9'): Promise<void> {
+    const targetText = aspectRatio === '9:16' ? 'Portrait' : 'Landscape';
+    
+    // Find the combobox in the crop dialog
+    const cropDialog = document.querySelector('[role="dialog"]');
+    if (!cropDialog) {
+      console.log('[VideoFlowController] No crop dialog found for aspect ratio selection');
+      return;
+    }
+    
+    const combobox = cropDialog.querySelector('[role="combobox"]') as HTMLElement;
+    if (!combobox) {
+      console.log('[VideoFlowController] No combobox found in crop dialog');
+      return;
+    }
+    
+    // Check if already set correctly
+    if (combobox.textContent?.includes(targetText)) {
+      console.log('[VideoFlowController] Crop aspect ratio already set to:', targetText);
+      return;
+    }
+    
+    console.log('[VideoFlowController] Setting crop aspect ratio to:', targetText);
+    combobox.click();
+    await this.delay(300);
+    
+    // Wait for options to appear
+    await this.waitFor(
+      () => document.querySelectorAll('[role="option"]').length > 0,
+      'crop aspect ratio options',
+      5000
+    );
+    
+    // Find and click the target option
+    const options = document.querySelectorAll('[role="option"]');
+    const targetOption = Array.from(options).find(opt => opt.textContent?.includes(targetText));
+    if (targetOption) {
+      (targetOption as HTMLElement).click();
+      await this.delay(300);
+      
+      // Wait for dropdown to close
+      await this.waitFor(
+        () => document.querySelectorAll('[role="option"]').length === 0,
+        'crop dropdown close',
+        5000
+      );
+      await this.delay(200);
+      console.log('[VideoFlowController] Crop aspect ratio set to:', targetText);
+    } else {
+      console.log('[VideoFlowController] Could not find option:', targetText);
+    }
+  }
+
+  /**
    * Step: Upload start frame image
    */
-  async uploadImage(base64Image: string): Promise<void> {
+  async uploadImage(base64Image: string, aspectRatio: '9:16' | '16:9'): Promise<void> {
     const config = this.stepConfig['uploadImage'];
 
     // Convert base64 to File first
@@ -1045,12 +1161,9 @@ class VideoFlowController {
     
     if (!fileInput) {
       // Need to click Upload button in menu to create file input
-      // But we must NOT trigger the native picker - find and prepare the input first
       const uploadBtn = findButtonByText('Upload');
       if (!uploadBtn) throw new Error('Upload button not found in menu');
       
-      // Instead of clicking Upload (which opens native picker), 
-      // we'll create our own input and trigger the upload
       console.log('[VideoFlowController] Creating file input for upload');
       
       // Create a hidden file input
@@ -1060,61 +1173,12 @@ class VideoFlowController {
       fileInput.style.display = 'none';
       document.body.appendChild(fileInput);
       
-      // Set up mutation observer to detect when Google Flow processes the file
-      const uploadComplete = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Upload timeout')), config.timeoutMs);
-        
-        const checkComplete = () => {
-          // Check for Notice dialog
-          const noticeDialog = document.querySelector('[role="dialog"]');
-          if (noticeDialog?.textContent?.includes('Notice') && noticeDialog?.textContent?.includes('I agree')) {
-            console.log('[VideoFlowController] Notice dialog detected during upload');
-            const agreeBtn = findButtonByText('I agree');
-            if (agreeBtn) {
-              agreeBtn.click();
-            }
-          }
-          
-          // Check for crop dialog
-          const cropBtn = findButtonByText('Crop and Save');
-          if (cropBtn) {
-            console.log('[VideoFlowController] Crop dialog detected, clicking Crop and Save');
-            cropBtn.click();
-          }
-          
-          // Check if frame has image (upload complete)
-          const frameButtons = document.querySelectorAll('button');
-          for (const btn of frameButtons) {
-            if (btn.textContent?.includes('First Frame') || btn.querySelector('img')) {
-              // Check if button now has an image inside (not just "add" or "First Frame" text)
-              const img = btn.querySelector('img');
-              if (img) {
-                clearTimeout(timeout);
-                resolve();
-                return true;
-              }
-            }
-          }
-          return false;
-        };
-        
-        // Check periodically
-        const interval = setInterval(() => {
-          if (checkComplete()) {
-            clearInterval(interval);
-          }
-        }, 500);
-        
-        // Also clear interval on timeout
-        setTimeout(() => clearInterval(interval), config.timeoutMs);
-      });
-      
       // Set files and trigger events
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(file);
       fileInput.files = dataTransfer.files;
       
-      // Now click the Upload button - this should detect our file input
+      // Now click the Upload button
       uploadBtn.click();
       await this.delay(100);
       
@@ -1133,9 +1197,6 @@ class VideoFlowController {
       
       // Clean up our temp input
       document.body.removeChild(fileInput);
-      
-      // Wait for upload to complete
-      await uploadComplete;
     } else {
       // File input already exists, use it directly
       console.log('[VideoFlowController] Using existing file input');
@@ -1144,44 +1205,55 @@ class VideoFlowController {
       fileInput.files = dataTransfer.files;
       fileInput.dispatchEvent(new Event('change', { bubbles: true }));
       fileInput.dispatchEvent(new Event('input', { bubbles: true }));
-      
-      // Wait for processing
-      await this.delay(500);
-      
-      // Handle Notice dialog if it appears
-      const noticeDialog = document.querySelector('[role="dialog"]');
-      if (noticeDialog?.textContent?.includes('Notice') && noticeDialog?.textContent?.includes('I agree')) {
-        console.log('[VideoFlowController] Notice dialog detected, clicking I agree');
-        const agreeBtn = findButtonByText('I agree');
-        if (agreeBtn) {
-          agreeBtn.click();
-          await this.delay(500);
-        }
-      }
-      
-      // Handle crop dialog if it appears
-      const cropBtn = findButtonByText('Crop and Save');
-      if (cropBtn) {
-        cropBtn.click();
+    }
+    
+    // Wait for either Notice dialog or Crop dialog to appear
+    await this.delay(500);
+    
+    // Handle Notice dialog if it appears
+    let noticeDialog = document.querySelector('[role="dialog"]');
+    if (noticeDialog?.textContent?.includes('Notice') && noticeDialog?.textContent?.includes('I agree')) {
+      console.log('[VideoFlowController] Notice dialog detected, clicking I agree');
+      const agreeBtn = findButtonByText('I agree');
+      if (agreeBtn) {
+        agreeBtn.click();
         await this.delay(500);
       }
-      
-      // Wait for image to appear in frame slot
-      await this.waitFor(
-        () => {
-          const frameButtons = document.querySelectorAll('button');
-          for (const btn of frameButtons) {
-            if (btn.textContent?.includes('First Frame') || btn.querySelector('img')) {
-              const img = btn.querySelector('img');
-              if (img) return true;
-            }
-          }
-          return false;
-        },
-        'image upload complete',
-        config.timeoutMs
-      );
     }
+    
+    // Wait for crop dialog to appear
+    await this.waitFor(
+      () => findButtonByText('Crop and Save') !== null,
+      'crop dialog',
+      config.timeoutMs
+    );
+    
+    // Select aspect ratio in crop dialog BEFORE clicking Crop and Save
+    await this.selectCropAspectRatio(aspectRatio);
+    
+    // Now click Crop and Save
+    const cropBtn = findButtonByText('Crop and Save');
+    if (cropBtn) {
+      console.log('[VideoFlowController] Clicking Crop and Save');
+      cropBtn.click();
+      await this.delay(500);
+    }
+    
+    // Wait for image to appear in frame slot
+    await this.waitFor(
+      () => {
+        const frameButtons = document.querySelectorAll('button');
+        for (const btn of frameButtons) {
+          if (btn.textContent?.includes('First Frame') || btn.querySelector('img')) {
+            const img = btn.querySelector('img');
+            if (img) return true;
+          }
+        }
+        return false;
+      },
+      'image upload complete',
+      config.timeoutMs
+    );
     
     await this.delay(300);
     console.log('[VideoFlowController] Image upload complete');
@@ -1275,11 +1347,12 @@ class VideoFlowController {
     await this.delay(1000); // Wait for scenebuilder to load
   }
 
-  /**
+/**
    * Step: Enter extend mode via "Add clip after last clip" menu
    * @param aspectRatio - Aspect ratio to configure after entering extend mode
+   * @param outputCount - Output count to configure after entering extend mode
    */
-  async enterExtendMode(aspectRatio?: '9:16' | '16:9'): Promise<void> {
+  async enterExtendMode(aspectRatio?: '9:16' | '16:9', outputCount?: number): Promise<void> {
     const config = this.stepConfig['enterExtendMode'];
 
     // Click "Add clip after last clip" button
@@ -1313,8 +1386,8 @@ class VideoFlowController {
     console.log('[VideoFlowController] Entered extend mode');
 
     // Configure settings in extend mode (same dialog as Project Editor)
-    if (aspectRatio) {
-      await this.configureSettings(aspectRatio);
+    if (aspectRatio && outputCount) {
+      await this.configureSettings(aspectRatio, outputCount);
     }
   }
 
@@ -1483,13 +1556,13 @@ class VideoFlowController {
     let downloaded = false;
 
     try {
-      // Phase 1: Setup
+// Phase 1: Setup
       await this.executeStep('ensureVideoMode', () => this.ensureVideoMode());
-      await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio));
+      await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio, config.outputCount));
 
       // Phase 2: Upload image if provided
       if (config.image) {
-        await this.executeStep('uploadImage', () => this.uploadImage(config.image!));
+        await this.executeStep('uploadImage', () => this.uploadImage(config.image!, config.aspectRatio));
       }
 
       // Phase 3: Initial generation
@@ -1505,8 +1578,8 @@ class VideoFlowController {
       for (let i = 1; i < config.prompts.length; i++) {
         if (this.aborted) break;
 
-        // enterExtendMode also configures settings (aspect ratio) after entering extend mode
-        await this.executeStep('enterExtendMode', () => this.enterExtendMode(config.aspectRatio), i, config.prompts.length);
+// enterExtendMode also configures settings (aspect ratio) after entering extend mode
+        await this.executeStep('enterExtendMode', () => this.enterExtendMode(config.aspectRatio, config.outputCount), i, config.prompts.length);
         await this.executeStep('fillExtensionPrompt', () => this.fillExtensionPrompt(config.prompts[i]), i, config.prompts.length);
         await this.executeStep('clickCreate', () => this.clickCreate(), i, config.prompts.length);
         await this.executeStep('waitForExtensionComplete', () => this.waitForExtensionCompletion(), i, config.prompts.length);
@@ -4336,10 +4409,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'START_VIDEO_WORKFLOW':
       (async () => {
         try {
-          const videoConfig: VideoSetConfig = {
+const videoConfig: VideoSetConfig = {
             image: message.image,
             prompts: message.prompts || [],
             aspectRatio: message.aspectRatio || '9:16',
+            outputCount: message.videoCount || 1,
             autoDownload: message.autoDownload ?? true,
           };
 
@@ -4347,6 +4421,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             hasImage: !!videoConfig.image,
             promptCount: videoConfig.prompts.length,
             aspectRatio: videoConfig.aspectRatio,
+            outputCount: videoConfig.outputCount,
             autoDownload: videoConfig.autoDownload,
           });
 
