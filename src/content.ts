@@ -1317,12 +1317,26 @@ class VideoFlowController {
   async waitForInitialCompletion(): Promise<void> {
     const config = this.stepConfig['waitForInitialComplete'];
 
-    // Wait for "Add to scene" button to appear (indicates completion)
+    // Wait for percentage to disappear (generation finished)
     await this.waitFor(
-      () => findButtonByText('Add to scene') !== null,
-      'Add to scene button',
+      () => {
+        const allText = document.body.innerText || '';
+        const hasPercentage = /\d{1,3}%/.test(allText);
+        return !hasPercentage;
+      },
+      'generation percentage to disappear',
       config.timeoutMs
     );
+
+    // Delay 1s to let UI render success indicator
+    await this.delay(1000);
+
+    // Check for success indicator - if not present, generation failed
+    const hasAddToScene = findButtonByText('Add to scene') !== null;
+    if (!hasAddToScene) {
+      throw new Error('Generation failed - no success indicator');
+    }
+
     console.log('[VideoFlowController] Initial generation complete');
   }
 
@@ -1348,12 +1362,54 @@ class VideoFlowController {
   }
 
 /**
+   * Helper: Get timeline clips without relying on class names
+   * Uses semantic anchor (button) and structural filtering
+   */
+  private getTimelineClips(): HTMLElement[] {
+    // 1. Find semantic anchor
+    const addClipBtn = findButtonByText('Add clip after last clip');
+    if (!addClipBtn) return [];
+
+    // 2. Navigate to timeline container (sibling of button)
+    const timelineContainer = addClipBtn.parentElement?.children[0] as HTMLElement;
+    if (!timelineContainer) return [];
+
+    // 3. Filter clips: DIV children without slider
+    return Array.from(timelineContainer.children).filter(child => {
+      return child.tagName === 'DIV' && !child.querySelector('[role="slider"]');
+    }) as HTMLElement[];
+  }
+
+  /**
    * Step: Enter extend mode via "Add clip after last clip" menu
    * @param aspectRatio - Aspect ratio to configure after entering extend mode
    * @param outputCount - Output count to configure after entering extend mode
    */
   async enterExtendMode(aspectRatio?: '9:16' | '16:9', outputCount?: number): Promise<void> {
     const config = this.stepConfig['enterExtendMode'];
+
+    // Wait for timeline clips to be visible
+    await this.waitFor(
+      () => this.getTimelineClips().length > 0,
+      'timeline clips visible',
+      config.timeoutMs
+    );
+
+    // Select the last clip
+    const clips = this.getTimelineClips();
+    if (clips.length > 0) {
+      const lastClip = clips[clips.length - 1];
+      lastClip.click();
+      console.log(`[VideoFlowController] Selected last clip (${clips.length} total)`);
+      await this.delay(300);
+    }
+
+    // Wait for "Add clip after last clip" button to be available
+    await this.waitFor(
+      () => findButtonByText('Add clip after last clip') !== null,
+      'Add clip button visible',
+      config.timeoutMs
+    );
 
     // Click "Add clip after last clip" button
     const addClipBtn = findButtonByText('Add clip after last clip');
@@ -1424,12 +1480,15 @@ class VideoFlowController {
 
   /**
    * Step: Wait for extension generation to complete
+   * @param expectedClipCount - Expected number of clips after generation completes
    */
-  async waitForExtensionCompletion(): Promise<void> {
+  async waitForExtensionCompletion(expectedClipCount?: number): Promise<void> {
     const config = this.stepConfig['waitForExtensionComplete'];
 
-    // In extend mode, completion is when percentage disappears
-    // and the timeline shows the extended duration
+    // In extend mode, completion is when:
+    // 1. Percentage disappears
+    // 2. Still in scenebuilder (not error state)
+    // 3. Clip count matches expected (if provided)
     await this.waitFor(
       () => {
         // Check no percentage is showing
@@ -1438,13 +1497,22 @@ class VideoFlowController {
         if (hasPercentage) return false;
 
         // Check that we're still in scenebuilder (not error state)
-        return window.location.href.includes('/scenes/');
+        if (!window.location.href.includes('/scenes/')) return false;
+
+        // If expected clip count provided, verify it
+        if (expectedClipCount !== undefined) {
+          const currentClips = this.getTimelineClips().length;
+          if (currentClips < expectedClipCount) return false;
+        }
+
+        return true;
       },
       'extension generation complete',
       config.timeoutMs
     );
     await this.delay(500);
-    console.log('[VideoFlowController] Extension complete');
+    const finalClipCount = this.getTimelineClips().length;
+    console.log(`[VideoFlowController] Extension complete (${finalClipCount} clips)`);
   }
 
   /**
@@ -1578,11 +1646,14 @@ class VideoFlowController {
       for (let i = 1; i < config.prompts.length; i++) {
         if (this.aborted) break;
 
-// enterExtendMode also configures settings (aspect ratio) after entering extend mode
+        // Expected clip count: initial (1) + extensions completed so far (i-1) + this extension (1) = i + 1
+        const expectedClipCount = i + 1;
+
+        // enterExtendMode also configures settings (aspect ratio) after entering extend mode
         await this.executeStep('enterExtendMode', () => this.enterExtendMode(config.aspectRatio, config.outputCount), i, config.prompts.length);
         await this.executeStep('fillExtensionPrompt', () => this.fillExtensionPrompt(config.prompts[i]), i, config.prompts.length);
         await this.executeStep('clickCreate', () => this.clickCreate(), i, config.prompts.length);
-        await this.executeStep('waitForExtensionComplete', () => this.waitForExtensionCompletion(), i, config.prompts.length);
+        await this.executeStep('waitForExtensionComplete', () => this.waitForExtensionCompletion(expectedClipCount), i, config.prompts.length);
         completedPrompts = i + 1;
       }
 
