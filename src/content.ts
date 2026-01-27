@@ -1265,6 +1265,9 @@ class VideoFlowController {
   async fillPrompt(prompt: string): Promise<void> {
     const config = this.stepConfig['fillPrompt'];
 
+    // Wait for UI to be fully ready before interacting with prompt
+    await this.delay(1000);
+
     // Find prompt textbox
     const textbox = document.querySelector('textarea, input[type="text"]') as HTMLInputElement | HTMLTextAreaElement;
     if (!textbox) throw new Error('Prompt textbox not found');
@@ -1415,6 +1418,7 @@ class VideoFlowController {
     const addClipBtn = findButtonByText('Add clip after last clip');
     if (!addClipBtn) throw new Error('Add clip button not found');
 
+    await this.delay(1000); // Wait for SceneBuilder UI to be fully interactive
     addClipBtn.click();
     await this.delay(300);
 
@@ -1485,32 +1489,33 @@ class VideoFlowController {
   async waitForExtensionCompletion(expectedClipCount?: number): Promise<void> {
     const config = this.stepConfig['waitForExtensionComplete'];
 
-    // In extend mode, completion is when:
-    // 1. Percentage disappears
-    // 2. Still in scenebuilder (not error state)
-    // 3. Clip count matches expected (if provided)
+    // Step 1: Wait for percentage to disappear (generation finished or failed)
     await this.waitFor(
       () => {
-        // Check no percentage is showing
         const allText = document.body.innerText || '';
         const hasPercentage = /\d{1,3}%/.test(allText);
-        if (hasPercentage) return false;
-
-        // Check that we're still in scenebuilder (not error state)
-        if (!window.location.href.includes('/scenes/')) return false;
-
-        // If expected clip count provided, verify it
-        if (expectedClipCount !== undefined) {
-          const currentClips = this.getTimelineClips().length;
-          if (currentClips < expectedClipCount) return false;
-        }
-
-        return true;
+        return !hasPercentage;
       },
-      'extension generation complete',
+      'generation percentage to disappear',
       config.timeoutMs
     );
-    await this.delay(500);
+
+    // Step 2: Delay to let UI render result
+    await this.delay(1000);
+
+    // Step 3: Check we're still in scenebuilder (not error state)
+    if (!window.location.href.includes('/scenes/')) {
+      throw new Error('Extension generation failed - navigated away from scenebuilder');
+    }
+
+    // Step 4: Check for success indicator - clip count must have increased
+    if (expectedClipCount !== undefined) {
+      const currentClips = this.getTimelineClips().length;
+      if (currentClips < expectedClipCount) {
+        throw new Error(`Extension generation failed - expected ${expectedClipCount} clips but found ${currentClips}`);
+      }
+    }
+
     const finalClipCount = this.getTimelineClips().length;
     console.log(`[VideoFlowController] Extension complete (${finalClipCount} clips)`);
   }
