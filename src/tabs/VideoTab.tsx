@@ -17,7 +17,7 @@ function VideoTab() {
 Full body shot of an attractive young woman dancing K-pop style in the front of the door of a modern living room, showing a fit midriff, confident and seductive smile, fluid body movement, sharp focus, trending on social media, realistic photography --ar 9:16`
 
   // Form state
-  const [startFrameImage, setStartFrameImage] = useState<string | null>(null)
+  const [startFrameImages, setStartFrameImages] = useState<string[]>([])
   const [prompts, setPrompts] = useState<string[]>([''])
   const [style, setStyle] = useState('tiktok_real')
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16')
@@ -51,14 +51,20 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
   }, [])
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
+    const files = Array.from(e.target.files || [])
+    files.forEach(file => {
       const reader = new FileReader()
       reader.onload = (event) => {
-        setStartFrameImage(event.target?.result as string)
+        setStartFrameImages(prev => [...prev, event.target?.result as string])
       }
       reader.readAsDataURL(file)
-    }
+    })
+    // Reset input so same file can be re-selected
+    e.target.value = ''
+  }
+
+  const removeImage = (index: number) => {
+    setStartFrameImages(prev => prev.filter((_, i) => i !== index))
   }
 
   const handlePromptChange = (index: number, value: string) => {
@@ -105,7 +111,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
       // Send message to content script
       const response = await chrome.tabs.sendMessage(tab.id, {
         type: 'START_VIDEO_WORKFLOW',
-        image: startFrameImage,
+        images: startFrameImages,
         prompts: validPrompts,
         style,
         aspectRatio,
@@ -161,36 +167,42 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
       {/* Start Frame Image */}
       <div className="form-control">
         <label className="label">
-          <span className="label-text select-text">Start Frame (Optional)</span>
+          <span className="label-text select-text">Start Frames (Optional)</span>
         </label>
-        <div
-          className="border-2 border-dashed border-primary/30 rounded-xl p-4 text-center cursor-pointer hover:border-primary/60 transition-colors"
-          onClick={() => document.getElementById('videoStartFrameInput')?.click()}
-        >
-          {startFrameImage ? (
-            <div className="relative">
-              <img src={startFrameImage} alt="Start Frame" className="max-h-24 mx-auto rounded-lg" />
+        
+        <div className="grid grid-cols-3 gap-2">
+          {startFrameImages.map((img, index) => (
+            <div key={index} className="relative aspect-[9/16] rounded-lg overflow-hidden border-2 border-primary/30 group">
+              <img src={img} alt={`Frame ${index + 1}`} className="w-full h-full object-cover" />
               <button
-                className="btn btn-xs btn-circle btn-error absolute top-0 right-0 -mt-2 -mr-2"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setStartFrameImage(null)
-                }}
+                className="btn btn-xs btn-circle btn-error absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                onClick={() => removeImage(index)}
               >
                 x
               </button>
             </div>
-          ) : (
-            <div className="text-base-content/50">
+          ))}
+          <div
+            className="aspect-[9/16] border-2 border-dashed border-primary/30 rounded-lg flex items-center justify-center cursor-pointer hover:border-primary/60 transition-colors"
+            onClick={() => document.getElementById('videoStartFrameInput')?.click()}
+          >
+            <div className="text-center text-base-content/50">
               <span className="text-2xl">🖼️</span>
-              <p className="mt-1 text-sm">Click to upload start frame</p>
+              <p className="mt-1 text-xs">Add photo</p>
             </div>
-          )}
+          </div>
         </div>
+        {startFrameImages.length > 0 && (
+          <div className="text-xs text-base-content/50 mt-1">
+            {startFrameImages.length} photo{startFrameImages.length > 1 ? 's' : ''}
+          </div>
+        )}
+
         <input
           id="videoStartFrameInput"
           type="file"
           accept=".png,.jpg,.jpeg,.webp"
+          multiple
           className="hidden"
           onChange={handleImageUpload}
           disabled={isRunning}
