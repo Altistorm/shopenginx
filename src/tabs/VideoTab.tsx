@@ -7,6 +7,8 @@ interface VideoProgressEvent {
   status: 'running' | 'success' | 'retrying' | 'failed';
   promptIndex?: number;
   totalPrompts?: number;
+  imageIndex?: number;
+  totalImages?: number;
   error?: string;
 }
 
@@ -97,35 +99,68 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
     setResult(null)
 
     try {
-      // Get active tab
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-      if (!tab?.id) {
-        throw new Error('No active tab found')
+      const imagesToProcess = startFrameImages.length > 0 ? startFrameImages : [null]
+      const results: { success: boolean; error?: string; completedPrompts?: number }[] = []
+
+      for (let imgIndex = 0; imgIndex < imagesToProcess.length; imgIndex++) {
+        const currentImage = imagesToProcess[imgIndex]
+
+        // Update progress with image index
+        setProgress({
+          step: 'startingImage',
+          attempt: 1,
+          maxAttempts: 1,
+          status: 'running',
+          imageIndex: imgIndex,
+          totalImages: imagesToProcess.length,
+        })
+
+        // Get active tab (re-query each iteration — tab may have navigated)
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+        if (!tab?.id) {
+          throw new Error('No active tab found')
+        }
+
+        // Ensure tab is on Google Flow
+        if (!tab.url?.includes('labs.google/fx/tools/flow')) {
+          throw new Error('Please navigate to Google Flow first (labs.google/fx/tools/flow)')
+        }
+        // Navigate to Flow homepage if on a project page
+        if (!tab.url.match(/\/fx\/tools\/flow\/?$/)) {
+          await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
+          await new Promise(resolve => setTimeout(resolve, 5000))
+        }
+
+        // Send single image workflow
+        const response = await chrome.tabs.sendMessage(tab.id, {
+          type: 'START_VIDEO_WORKFLOW',
+          image: currentImage,
+          prompts: validPrompts,
+          style,
+          aspectRatio,
+          videoCount,
+          noTextOnVideo,
+          autoDownload,
+        })
+
+        results.push(response)
+
+        // Navigate back to Flow homepage for next image (not after last)
+        if (imgIndex < imagesToProcess.length - 1) {
+          await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
+          await new Promise(resolve => setTimeout(resolve, 5000))
+        }
       }
 
-      // Ensure tab is on Google Flow homepage (content script can't navigate — it kills the script)
-      if (!tab.url?.includes('labs.google/fx/tools/flow')) {
-        throw new Error('Please navigate to Google Flow first (labs.google/fx/tools/flow)')
-      }
-      // Navigate to Flow homepage if on a project page
-      if (!tab.url.match(/\/fx\/tools\/flow\/?$/)) {
-        await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
-        await new Promise(resolve => setTimeout(resolve, 5000))
-      }
-
-      // Send message to content script
-      const response = await chrome.tabs.sendMessage(tab.id, {
-        type: 'START_VIDEO_WORKFLOW',
-        image: startFrameImages.length > 0 ? startFrameImages[0] : null,
-        prompts: validPrompts,
-        style,
-        aspectRatio,
-        videoCount,
-        noTextOnVideo,
-        autoDownload,
+      // Aggregate results
+      const successCount = results.filter(r => r.success).length
+      setResult({
+        success: results.every(r => r.success),
+        completedPrompts: successCount,
+        error: successCount < results.length
+          ? successCount + '/' + results.length + ' videos completed'
+          : undefined,
       })
-
-      setResult(response)
     } catch (error) {
       setResult({
         success: false,
@@ -152,6 +187,8 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
   const getStepDisplayName = (step: string): string => {
     const names: Record<string, string> = {
+      createNewProject: 'Creating new project',
+      startingImage: 'Starting image',
       ensureVideoMode: 'Setting video mode',
       configureSettings: 'Configuring settings',
       uploadImage: 'Uploading start frame',
@@ -358,6 +395,11 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
               {progress.status === 'failed' && <span>✗</span>}
               <span className="font-medium">{getStepDisplayName(progress.step)}</span>
             </div>
+            {progress.totalImages && progress.totalImages > 1 && (
+              <div className="text-sm mt-1">
+                Photo {(progress.imageIndex ?? 0) + 1} of {progress.totalImages}
+              </div>
+            )}
             {progress.totalPrompts && progress.totalPrompts > 1 && (
               <div className="text-sm mt-1">
                 Clip {(progress.promptIndex ?? 0) + 1} of {progress.totalPrompts}
