@@ -111,7 +111,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
       // Send message to content script
       const response = await chrome.tabs.sendMessage(tab.id, {
         type: 'START_VIDEO_WORKFLOW',
-        images: startFrameImages,
+        image: startFrameImages.length > 0 ? startFrameImages[0] : null,
         prompts: validPrompts,
         style,
         aspectRatio,
