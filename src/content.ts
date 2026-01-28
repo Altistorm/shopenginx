@@ -761,6 +761,10 @@ class VideoFlowController {
   private progressCallback: ((event: VideoProgressEvent) => void) | null = null;
   private stepConfig: Record<string, StepRetryConfig>;
 
+  // Generation retry configuration
+  private static readonly GENERATION_MAX_RETRIES = 5; // 6 total attempts
+  private static readonly GENERATION_RETRY_DELAY_MS = 5000; // 5 seconds
+
   constructor(
     stepConfigOverrides?: Partial<Record<string, Partial<StepRetryConfig>>>,
     onProgress?: (event: VideoProgressEvent) => void
@@ -872,6 +876,19 @@ class VideoFlowController {
     if (this.progressCallback) {
       this.progressCallback(event);
     }
+  }
+
+  /**
+   * Report generation retry progress
+   */
+  private reportGenerationRetry(phase: 'initial' | 'extension', attempt: number, maxAttempts: number, error: string): void {
+    this.reportProgress({
+      step: phase === 'initial' ? 'waitForInitialComplete' : 'waitForExtensionComplete',
+      attempt,
+      maxAttempts,
+      status: 'retrying',
+      error: `Generation failed, retrying (${attempt}/${maxAttempts}): ${error}`
+    });
   }
 
   /**
@@ -1688,16 +1705,41 @@ class VideoFlowController {
       await this.executeStep('ensureVideoMode', () => this.ensureVideoMode());
       await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio, config.outputCount));
 
-      // Phase 2: Upload image if provided
-      if (config.image) {
-        await this.executeStep('uploadImage', () => this.uploadImage(config.image!, config.aspectRatio));
-      }
+      // Phase 2-3: Upload and Initial generation (with retry)
+      let initialGenAttempt = 0;
+      while (initialGenAttempt <= VideoFlowController.GENERATION_MAX_RETRIES) {
+        try {
+          // Phase 2: Upload image if provided
+          if (config.image) {
+            await this.executeStep('uploadImage', () => this.uploadImage(config.image!, config.aspectRatio));
+          }
 
-      // Phase 3: Initial generation
-      await this.executeStep('fillPrompt', () => this.fillPrompt(config.prompts[0]), 0, config.prompts.length);
-      await this.executeStep('clickCreate', () => this.clickCreate(), 0, config.prompts.length);
-      await this.executeStep('waitForInitialComplete', () => this.waitForInitialCompletion(), 0, config.prompts.length);
-      completedPrompts = 1;
+          // Phase 3: Initial generation
+          await this.executeStep('fillPrompt', () => this.fillPrompt(config.prompts[0]), 0, config.prompts.length);
+          await this.executeStep('clickCreate', () => this.clickCreate(), 0, config.prompts.length);
+          await this.executeStep('waitForInitialComplete', () => this.waitForInitialCompletion(), 0, config.prompts.length);
+          completedPrompts = 1;
+          break; // Success - exit retry loop
+        } catch (error) {
+          initialGenAttempt++;
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          
+          if (initialGenAttempt > VideoFlowController.GENERATION_MAX_RETRIES) {
+            throw error; // Max retries exceeded, propagate error
+          }
+          
+          this.reportGenerationRetry('initial', initialGenAttempt, VideoFlowController.GENERATION_MAX_RETRIES + 1, errorMsg);
+          console.log(`[VideoFlowController] Initial generation failed, retrying (${initialGenAttempt}/${VideoFlowController.GENERATION_MAX_RETRIES + 1}): ${errorMsg}`);
+          await this.delay(VideoFlowController.GENERATION_RETRY_DELAY_MS);
+          
+          // Navigate back to Flow homepage for fresh start
+          window.location.href = 'https://labs.google/fx/tools/flow';
+          await this.delay(3000); // Wait for page load
+          
+          // Re-run createNewProject for fresh state
+          await this.executeStep('createNewProject', () => this.createNewProject());
+        }
+      }
 
       // Phase 4: Add to scene (transition to scenebuilder)
       await this.executeStep('clickAddToScene', () => this.clickAddToScene());
@@ -1708,13 +1750,31 @@ class VideoFlowController {
 
         // Expected clip count: initial (1) + extensions completed so far (i-1) + this extension (1) = i + 1
         const expectedClipCount = i + 1;
+        let extensionAttempt = 0;
 
-        // enterExtendMode also configures settings (aspect ratio) after entering extend mode
-        await this.executeStep('enterExtendMode', () => this.enterExtendMode(config.aspectRatio, config.outputCount), i, config.prompts.length);
-        await this.executeStep('fillExtensionPrompt', () => this.fillExtensionPrompt(config.prompts[i]), i, config.prompts.length);
-        await this.executeStep('clickCreate', () => this.clickCreate(), i, config.prompts.length);
-        await this.executeStep('waitForExtensionComplete', () => this.waitForExtensionCompletion(expectedClipCount), i, config.prompts.length);
-        completedPrompts = i + 1;
+        while (extensionAttempt <= VideoFlowController.GENERATION_MAX_RETRIES) {
+          try {
+            // enterExtendMode also configures settings (aspect ratio) after entering extend mode
+            await this.executeStep('enterExtendMode', () => this.enterExtendMode(config.aspectRatio, config.outputCount), i, config.prompts.length);
+            await this.executeStep('fillExtensionPrompt', () => this.fillExtensionPrompt(config.prompts[i]), i, config.prompts.length);
+            await this.executeStep('clickCreate', () => this.clickCreate(), i, config.prompts.length);
+            await this.executeStep('waitForExtensionComplete', () => this.waitForExtensionCompletion(expectedClipCount), i, config.prompts.length);
+            completedPrompts = i + 1;
+            break; // Success - exit retry loop
+          } catch (error) {
+            extensionAttempt++;
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            
+            if (extensionAttempt > VideoFlowController.GENERATION_MAX_RETRIES) {
+              throw error; // Max retries exceeded, propagate error
+            }
+            
+            this.reportGenerationRetry('extension', extensionAttempt, VideoFlowController.GENERATION_MAX_RETRIES + 1, errorMsg);
+            console.log(`[VideoFlowController] Extension ${i} generation failed, retrying (${extensionAttempt}/${VideoFlowController.GENERATION_MAX_RETRIES + 1}): ${errorMsg}`);
+            await this.delay(VideoFlowController.GENERATION_RETRY_DELAY_MS);
+            // No navigation needed - already in scenebuilder, enterExtendMode will re-select clip
+          }
+        }
       }
 
       // Phase 6: Download
