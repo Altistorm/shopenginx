@@ -712,6 +712,7 @@ interface VideoFlowResult {
 
 // Default retry configuration per step
 const DEFAULT_VIDEO_STEP_CONFIG: Record<string, StepRetryConfig> = {
+  createNewProject:       { maxAttempts: 3, retryDelayMs: 2000, timeoutMs: 30000 },
   ensureVideoMode:        { maxAttempts: 3, retryDelayMs: 1000, timeoutMs: 30000 },
   configureSettings:      { maxAttempts: 2, retryDelayMs: 1000, timeoutMs: 30000 },
   uploadImage:            { maxAttempts: 3, retryDelayMs: 2000, timeoutMs: 60000 },
@@ -900,6 +901,54 @@ class VideoFlowController {
   }
 
   // ==================== Step Functions ====================
+
+  /**
+   * Step: Create a new project by clicking "+ New project" button
+   * Must be on the Flow homepage (https://labs.google/fx/tools/flow)
+   */
+  async createNewProject(): Promise<void> {
+    const config = this.stepConfig['createNewProject'];
+
+    // Navigate to Flow homepage first
+    if (!window.location.href.includes('labs.google/fx/tools/flow')) {
+      window.location.href = 'https://labs.google/fx/tools/flow';
+    } else if (window.location.pathname !== '/fx/tools/flow') {
+      // Already on Flow but not homepage (e.g. on a project page)
+      window.location.href = 'https://labs.google/fx/tools/flow';
+    }
+
+    // Wait for the Flow homepage to load (New project button appears)
+    await this.waitFor(
+      () => findButtonByText('New project') !== null,
+      'Flow homepage loaded',
+      config.timeoutMs
+    );
+    await this.delay(1000);
+
+    // Find the "+ New project" button (contains "New project" text)
+    const newProjectBtn = findButtonByText('New project');
+    if (!newProjectBtn) throw new Error('New project button not found');
+
+    newProjectBtn.click();
+    console.log('[VideoFlowController] Clicked New project button');
+
+    // Wait for navigation to new project page (URL changes to /project/{uuid})
+    await this.waitFor(
+      () => /\/project\/[0-9a-f-]+$/.test(window.location.pathname),
+      'new project page loaded',
+      config.timeoutMs
+    );
+
+    // Wait for the prompt textbox to appear (page fully loaded)
+    await this.waitFor(
+      () => document.querySelector('textarea, input[type="text"]') !== null,
+      'prompt textbox visible',
+      config.timeoutMs
+    );
+
+    await this.delay(1000); // Let UI settle
+    console.log('[VideoFlowController] New project created:', window.location.href);
+  }
 
   /**
    * Step: Ensure we're in "Frames to Video" mode
@@ -1550,6 +1599,27 @@ class VideoFlowController {
       config.timeoutMs
     );
     console.log('[VideoFlowController] Download complete');
+
+    // Click the Download link inside the "Video exported!" notification
+    const notification = findByText('[role="listitem"]', 'Video exported');
+    if (notification) {
+      // Find the Download link within the notification
+      const clickables = notification.querySelectorAll('a, button, [role="button"]');
+      for (const el of clickables) {
+        if (el.textContent?.includes('Download')) {
+          (el as HTMLElement).click();
+          console.log('[VideoFlowController] Clicked Download link in notification');
+          break;
+        }
+      }
+
+      // Optionally dismiss the notification
+      const dismissBtn = findButtonByText('Dismiss');
+      if (dismissBtn) {
+        dismissBtn.click();
+        console.log('[VideoFlowController] Dismissed notification');
+      }
+    }
   }
 
   // ==================== Execution Engine ====================
@@ -1629,6 +1699,9 @@ class VideoFlowController {
     let downloaded = false;
 
     try {
+// Phase 0: Create new project
+      await this.executeStep('createNewProject', () => this.createNewProject());
+
 // Phase 1: Setup
       await this.executeStep('ensureVideoMode', () => this.ensureVideoMode());
       await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio, config.outputCount));
