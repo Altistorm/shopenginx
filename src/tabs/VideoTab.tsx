@@ -20,6 +20,8 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
   // Form state
   const [startFrameImages, setStartFrameImages] = useState<string[]>([])
+  const [imageStatuses, setImageStatuses] = useState<Array<{ failed: boolean; url?: string; completedPrompts?: number }>>([])
+  const [currentImageIndex, setCurrentImageIndex] = useState<number | null>(null)
   const [prompts, setPrompts] = useState<string[]>([''])
   const [style, setStyle] = useState('tiktok_real')
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16')
@@ -68,6 +70,8 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
   const removeImage = (index: number) => {
     setStartFrameImages(prev => prev.filter((_, i) => i !== index))
+    // Also remove the corresponding status
+    setImageStatuses(prev => prev.filter((_, i) => i !== index))
   }
 
   const handlePromptChange = (index: number, value: string) => {
@@ -99,6 +103,8 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
     setProgress(null)
     setResult(null)
     stopRequestedRef.current = false
+    setImageStatuses(startFrameImages.map(() => ({ failed: false })))
+    setCurrentImageIndex(null)
 
     try {
       const imagesToProcess = startFrameImages.length > 0 ? startFrameImages : [null]
@@ -111,6 +117,9 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
           break
         }
         const currentImage = imagesToProcess[imgIndex]
+
+        // Update current image index for UI highlight
+        setCurrentImageIndex(imgIndex)
 
         // Update progress with image index
         setProgress({
@@ -152,6 +161,22 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
         results.push(response)
 
+         // Update image status - capture URL if failed
+         if (!response.success && startFrameImages.length > 0) {
+           const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+           setImageStatuses(prev => {
+             const updated = [...prev]
+             if (updated[imgIndex]) {
+               updated[imgIndex] = { 
+                 failed: true, 
+                 url: currentTab?.url,
+                 completedPrompts: response.completedPrompts || 0
+               }
+             }
+             return updated
+           })
+         }
+
         // Check if stop was requested OR if workflow was aborted
         if (stopRequestedRef.current || response.error?.includes('aborted')) {
           console.log('[VideoTab] Stop requested or workflow aborted, breaking loop')
@@ -182,6 +207,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
     } finally {
       setIsRunning(false)
       setProgress(null)
+      setCurrentImageIndex(null)
     }
   }
 
@@ -228,14 +254,39 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
         
         <div className="grid grid-cols-3 gap-2">
           {startFrameImages.map((img, index) => (
-            <div key={index} className="relative aspect-[9/16] rounded-lg overflow-hidden border-2 border-primary/30 group">
+            <div 
+              key={index} 
+              className={`relative aspect-[9/16] rounded-lg overflow-hidden border-2 group transition-all ${
+                currentImageIndex === index 
+                  ? 'border-warning ring-2 ring-warning ring-offset-2 ring-offset-base-100' 
+                  : 'border-primary/30'
+              }`}
+            >
               <img src={img} alt={`Frame ${index + 1}`} className="w-full h-full object-cover" />
+              {/* Remove button */}
               <button
                 className="btn btn-xs btn-circle btn-error absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 onClick={() => removeImage(index)}
+                disabled={isRunning}
               >
                 x
               </button>
+              {/* Processing indicator */}
+              {currentImageIndex === index && (
+                <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                  <span className="loading loading-spinner loading-md text-warning"></span>
+                </div>
+              )}
+               {/* Fail indicator - bottom right circle */}
+               {imageStatuses[index]?.failed && (
+                 <button
+                   className="btn btn-xs btn-circle btn-error absolute bottom-1 right-1 shadow-lg"
+                   onClick={() => imageStatuses[index]?.url && window.open(imageStatuses[index].url, '_blank')}
+                   title={`${imageStatuses[index]?.completedPrompts || 0} clips generated. Click to open failed project`}
+                 >
+                   {imageStatuses[index]?.completedPrompts || 0}
+                 </button>
+               )}
             </div>
           ))}
           <div
