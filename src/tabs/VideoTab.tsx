@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 interface VideoProgressEvent {
   step: string;
@@ -37,6 +37,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
   // Workflow state
   const [isRunning, setIsRunning] = useState(false)
+  const stopRequestedRef = useRef(false)
   const [progress, setProgress] = useState<VideoProgressEvent | null>(null)
   const [result, setResult] = useState<{ success: boolean; error?: string; completedPrompts?: number } | null>(null)
 
@@ -97,12 +98,18 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
     setIsRunning(true)
     setProgress(null)
     setResult(null)
+    stopRequestedRef.current = false
 
     try {
       const imagesToProcess = startFrameImages.length > 0 ? startFrameImages : [null]
       const results: { success: boolean; error?: string; completedPrompts?: number }[] = []
 
       for (let imgIndex = 0; imgIndex < imagesToProcess.length; imgIndex++) {
+        // Check if stop was requested
+        if (stopRequestedRef.current) {
+          console.log('[VideoTab] Stop requested, breaking loop')
+          break
+        }
         const currentImage = imagesToProcess[imgIndex]
 
         // Update progress with image index
@@ -145,6 +152,12 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
         results.push(response)
 
+        // Check if stop was requested OR if workflow was aborted
+        if (stopRequestedRef.current || response.error?.includes('aborted')) {
+          console.log('[VideoTab] Stop requested or workflow aborted, breaking loop')
+          break
+        }
+
         // Navigate back to Flow homepage for next image (not after last)
         if (imgIndex < imagesToProcess.length - 1) {
           await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
@@ -173,6 +186,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
   }
 
   const handleStop = async () => {
+    stopRequestedRef.current = true
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
       if (tab?.id) {
