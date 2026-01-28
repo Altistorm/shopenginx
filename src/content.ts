@@ -909,13 +909,8 @@ class VideoFlowController {
   async createNewProject(): Promise<void> {
     const config = this.stepConfig['createNewProject'];
 
-    // Navigate to Flow homepage first
-    if (!window.location.href.includes('labs.google/fx/tools/flow')) {
-      window.location.href = 'https://labs.google/fx/tools/flow';
-    } else if (window.location.pathname !== '/fx/tools/flow') {
-      // Already on Flow but not homepage (e.g. on a project page)
-      window.location.href = 'https://labs.google/fx/tools/flow';
-    }
+    // Sidebar navigates to Flow homepage via chrome.tabs.update() before sending message.
+    // Content script must NOT use window.location.href — it kills the script.
 
     // Wait for the Flow homepage to load (New project button appears)
     await this.waitFor(
@@ -1582,43 +1577,30 @@ class VideoFlowController {
     downloadBtn.click();
     console.log('[VideoFlowController] Clicked Download button');
 
-    // Wait for download to complete
-    // For extended videos, need to wait for "Video exported!" notification
+    // Wait for "Video exported!" notification
     await this.waitFor(
-      () => {
-        // Check for "Video exported!" notification
-        const exported = findByText('[role="listitem"]', 'Video exported');
-        if (exported) return true;
-
-        // Or check if download button is re-enabled (for short videos)
-        const btn = findButtonByText('Download');
-        return btn !== null && !btn.hasAttribute('disabled') && 
-               !btn.textContent?.includes('progress_activity');
-      },
-      'video download/export complete',
+      () => findByText('[data-sonner-toast]', 'Video exported') !== null,
+      'Video exported notification',
       config.timeoutMs
     );
-    console.log('[VideoFlowController] Download complete');
+    console.log('[VideoFlowController] Export complete');
 
     // Click the Download link inside the "Video exported!" notification
-    const notification = findByText('[role="listitem"]', 'Video exported');
+    const notification = findByText('[data-sonner-toast]', 'Video exported');
     if (notification) {
-      // Find the Download link within the notification
-      const clickables = notification.querySelectorAll('a, button, [role="button"]');
-      for (const el of clickables) {
-        if (el.textContent?.includes('Download')) {
-          (el as HTMLElement).click();
-          console.log('[VideoFlowController] Clicked Download link in notification');
-          break;
-        }
+      // Find the Download link within the notification (it is an <a> tag)
+      const downloadLink = notification.querySelector('a');
+      if (downloadLink) {
+        (downloadLink as HTMLElement).click();
+        console.log('[VideoFlowController] Clicked Download link in notification');
       }
 
-      // Optionally dismiss the notification
-      const dismissBtn = findButtonByText('Dismiss');
-      if (dismissBtn) {
-        dismissBtn.click();
-        console.log('[VideoFlowController] Dismissed notification');
-      }
+      // // Dismiss the notification
+      // const dismissBtn = notification.querySelector('button');
+      // if (dismissBtn) {
+      //   (dismissBtn as HTMLElement).click();
+      //   console.log('[VideoFlowController] Dismissed notification');
+      // }
     }
   }
 

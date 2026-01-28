@@ -103,9 +103,14 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
         throw new Error('No active tab found')
       }
 
-      // Check if on Google Flow
+      // Ensure tab is on Google Flow homepage (content script can't navigate — it kills the script)
       if (!tab.url?.includes('labs.google/fx/tools/flow')) {
         throw new Error('Please navigate to Google Flow first (labs.google/fx/tools/flow)')
+      }
+      // Navigate to Flow homepage if on a project page
+      if (!tab.url.match(/\/fx\/tools\/flow\/?$/)) {
+        await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
+        await new Promise(resolve => setTimeout(resolve, 5000))
       }
 
       // Send message to content script
