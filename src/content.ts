@@ -1602,22 +1602,46 @@ class VideoFlowController {
     );
     console.log('[VideoFlowController] Export complete');
 
-    // Click the Download link inside the "Video exported!" notification
+    // Extract URL from the Download link and use chrome.downloads API
     const notification = findByText('[data-sonner-toast]', 'Video exported');
     if (notification) {
-      // Find the Download link within the notification (it is an <a> tag)
-      const downloadLink = notification.querySelector('a');
-      if (downloadLink) {
-        (downloadLink as HTMLElement).click();
-        console.log('[VideoFlowController] Clicked Download link in notification');
+      const downloadLink = notification.querySelector('a') as HTMLAnchorElement;
+      if (downloadLink && downloadLink.href) {
+        // Generate timestamped filename
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const filename = `video_${timestamp}.mp4`;
+        
+        // Use background script to download to ShopEnginX folder
+        try {
+          const response = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+            chrome.runtime.sendMessage({
+              action: 'downloadImage',
+              url: downloadLink.href,
+              filename: filename,
+              subfolder: 'ShopEnginX'
+            }, resolve);
+          });
+          
+          if (response?.success) {
+            console.log(`[VideoFlowController] Video download started: ShopEnginX/${filename}`);
+          } else {
+            console.error('[VideoFlowController] Download failed:', response?.error);
+            // Fallback to clicking the link
+            downloadLink.click();
+          }
+        } catch (error) {
+          console.error('[VideoFlowController] Download API error, falling back to click:', error);
+          downloadLink.click();
+        }
       }
 
-      // // Dismiss the notification
-      // const dismissBtn = notification.querySelector('button');
-      // if (dismissBtn) {
-      //   (dismissBtn as HTMLElement).click();
-      //   console.log('[VideoFlowController] Dismissed notification');
-      // }
+      // Dismiss the notification
+      const dismissBtn = notification.querySelector('button');
+      if (dismissBtn) {
+        (dismissBtn as HTMLElement).click();
+        console.log('[VideoFlowController] Dismissed notification');
+      }
     }
   }
 
