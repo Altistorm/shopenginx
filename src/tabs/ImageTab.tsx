@@ -23,7 +23,7 @@ function ImageTab() {
   const [style, setStyle] = useState('tiktok_real')
   const [productName, setProductName] = useState('')
   const [modelType, setModelType] = useState('from_image')
-  const [multiSetMode, setMultiSetMode] = useState<'none' | 'multi' | 'sameModel'>('none')
+  const [multiSetMode, setMultiSetMode] = useState<'none' | 'story' | 'multi' | 'sameModel'>('none')
   const [setCount, setSetCount] = useState(2)
   const [imageSets, setImageSets] = useState<ImageSet[]>([])
   const [sharedModelImage, setSharedModelImage] = useState<string | null>(null)
@@ -34,6 +34,7 @@ function ImageTab() {
   const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('1K')
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
+  const [storyPrompts, setStoryPrompts] = useState<string[]>([''])
   const [isRunning, setIsRunning] = useState(false)
 
   const [validationError, setValidationError] = useState<string | null>(null)
@@ -97,6 +98,13 @@ function ImageTab() {
       // Single mode: require at least one image
       if (images.length === 0) {
         setValidationError('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')
+        return
+      }
+    } else if (multiSetMode === 'story') {
+      // Story mode: require at least one prompt
+      const validPrompts = storyPrompts.filter(p => p.trim())
+      if (validPrompts.length === 0) {
+        setValidationError('กรุณาใส่ Prompt อย่างน้อย 1 รายการ')
         return
       }
     } else if (multiSetMode === 'sameModel') {
@@ -216,7 +224,7 @@ function ImageTab() {
     setImageSets(sets)
   }
 
-  const handleMultiSetChange = (mode: 'none' | 'multi' | 'sameModel') => {
+  const handleMultiSetChange = (mode: 'none' | 'story' | 'multi' | 'sameModel') => {
     setMultiSetMode(mode)
     if (mode === 'multi') {
       generateSets(setCount, false)
@@ -231,30 +239,97 @@ function ImageTab() {
 
   return (
     <div className="space-y-2">
-      {/* Multi-set checkboxes */}
+      {/* Mode selection (radio buttons) */}
       <div className="space-y-1">
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg bg-base-300 hover:bg-base-100 transition-colors text-sm">
+        <label className={`flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg transition-colors text-sm ${multiSetMode === 'story' ? 'bg-primary/10 border border-primary/30' : 'bg-base-300 hover:bg-base-100'}`}>
           <input
-            type="checkbox"
-            className="checkbox checkbox-primary checkbox-sm"
+            type="radio"
+            name="imageMode"
+            className="radio radio-primary radio-sm"
+            checked={multiSetMode === 'story'}
+            onChange={() => handleMultiSetChange('story')}
+          />
+          <span className="select-text">📖 Story Mode (ไม่ต้องใช้รูปอ้างอิง)</span>
+        </label>
+
+        <label className={`flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg transition-colors text-sm ${multiSetMode === 'none' ? 'bg-primary/10 border border-primary/30' : 'bg-base-300 hover:bg-base-100'}`}>
+          <input
+            type="radio"
+            name="imageMode"
+            className="radio radio-primary radio-sm"
+            checked={multiSetMode === 'none'}
+            onChange={() => handleMultiSetChange('none')}
+          />
+          <span className="select-text">🛍️ สินค้าเดียว</span>
+        </label>
+
+        {/* Single product image upload - shown under สินค้าเดียว */}
+        {multiSetMode === 'none' && (
+          <div className="form-control pl-6">
+            <label className="label py-1">
+              <span className="label-text select-text text-xs">📷 รูปสินค้า <span className="text-error">*</span> <span className="opacity-50">(สูงสุด 8 รูป)</span></span>
+            </label>
+            <div className="flex flex-wrap gap-2 p-3 border-2 border-dashed border-primary/30 rounded-xl min-h-20">
+              {images.map((img, index) => (
+                <div key={index} className="relative w-16 h-16">
+                  <img src={img} alt="" className="w-full h-full object-cover rounded-lg" />
+                  <button
+                    className="btn btn-circle btn-xs btn-error absolute -top-1 -right-1"
+                    onClick={() => removeImage(index)}
+                  >
+                    ✕
+                  </button>
+                  <div className="absolute bottom-0 left-0 bg-primary text-primary-content text-xs w-4 h-4 flex items-center justify-center rounded-full">
+                    {index + 1}
+                  </div>
+                </div>
+              ))}
+              {images.length < 8 && (
+                <div
+                  className="w-16 h-16 border-2 border-dashed border-primary/40 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-primary transition-colors"
+                  onClick={() => document.getElementById('imageInput')?.click()}
+                >
+                  <span className="text-xl">+</span>
+                  <span className="text-xs">เพิ่มรูป</span>
+                </div>
+              )}
+            </div>
+            <input
+              id="imageInput"
+              type="file"
+              accept=".png,.jpg,.jpeg,.webp"
+              multiple
+              className="hidden"
+              onChange={handleImageUpload}
+            />
+          </div>
+        )}
+
+        <label className={`flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg transition-colors text-sm ${multiSetMode === 'multi' ? 'bg-primary/10 border border-primary/30' : 'bg-base-300 hover:bg-base-100'}`}>
+          <input
+            type="radio"
+            name="imageMode"
+            className="radio radio-primary radio-sm"
             checked={multiSetMode === 'multi'}
-            onChange={() => handleMultiSetChange(multiSetMode === 'multi' ? 'none' : 'multi')}
+            onChange={() => handleMultiSetChange('multi')}
           />
           <span className="select-text">📦 หลายชุดสินค้า (วนสร้างทีละชุด)</span>
         </label>
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg bg-base-300 hover:bg-base-100 transition-colors text-sm">
+
+        <label className={`flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg transition-colors text-sm ${multiSetMode === 'sameModel' ? 'bg-primary/10 border border-primary/30' : 'bg-base-300 hover:bg-base-100'}`}>
           <input
-            type="checkbox"
-            className="checkbox checkbox-primary checkbox-sm"
+            type="radio"
+            name="imageMode"
+            className="radio radio-primary radio-sm"
             checked={multiSetMode === 'sameModel'}
-            onChange={() => handleMultiSetChange(multiSetMode === 'sameModel' ? 'none' : 'sameModel')}
+            onChange={() => handleMultiSetChange('sameModel')}
           />
           <span className="select-text">👤 หลายชุดสินค้า นางแบบเดียว (วนสร้างทีละชุด)</span>
         </label>
       </div>
 
       {/* Multi-set area */}
-      {multiSetMode !== 'none' && (
+      {(multiSetMode === 'multi' || multiSetMode === 'sameModel') && (
         <div className="bg-base-300 rounded-lg p-2 space-y-2">
           {/* Set count selector - Only for multi mode */}
           {multiSetMode === 'multi' && (
@@ -451,47 +526,7 @@ function ImageTab() {
         </div>
       )}
 
-      {/* Single image upload (hidden when multi-set) */}
-      {multiSetMode === 'none' && (
-        <div className="form-control">
-          <label className="label py-1">
-            <span className="label-text select-text text-xs">📷 รูปสินค้า <span className="text-error">*</span> <span className="opacity-50">(สูงสุด 8 รูป)</span></span>
-          </label>
-          <div className="flex flex-wrap gap-2 p-3 border-2 border-dashed border-primary/30 rounded-xl min-h-20">
-            {images.map((img, index) => (
-              <div key={index} className="relative w-16 h-16">
-                <img src={img} alt="" className="w-full h-full object-cover rounded-lg" />
-                <button
-                  className="btn btn-circle btn-xs btn-error absolute -top-1 -right-1"
-                  onClick={() => removeImage(index)}
-                >
-                  ✕
-                </button>
-                <div className="absolute bottom-0 left-0 bg-primary text-primary-content text-xs w-4 h-4 flex items-center justify-center rounded-full">
-                  {index + 1}
-                </div>
-              </div>
-            ))}
-            {images.length < 8 && (
-              <div
-                className="w-16 h-16 border-2 border-dashed border-primary/40 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-primary transition-colors"
-                onClick={() => document.getElementById('imageInput')?.click()}
-              >
-                <span className="text-xl">+</span>
-                <span className="text-xs">เพิ่มรูป</span>
-              </div>
-            )}
-          </div>
-          <input
-            id="imageInput"
-            type="file"
-            accept=".png,.jpg,.jpeg,.webp"
-            multiple
-            className="hidden"
-            onChange={handleImageUpload}
-          />
-        </div>
-      )}
+
 
       {/* Style + Product Name */}
       <div className="grid grid-cols-2 gap-2">
@@ -512,6 +547,7 @@ function ImageTab() {
             <option value="minimalist">มินิมอล</option>
             <option value="luxury">หรูหรา</option>
             <option value="dance">💃 เต้น K-pop</option>
+            <option value="object_talk">🗣️ Object Talk</option>
           </select>
         </div>
         <div className="form-control">
@@ -542,6 +578,7 @@ function ImageTab() {
           <option value="female">นางแบบ</option>
           <option value="male">นายแบบ</option>
           <option value="cartoon3d">การ์ตูน 3D</option>
+          <option value="3d_pixar">3D Pixar</option>
           <option value="none">ไม่มี</option>
         </select>
       </div>
@@ -578,21 +615,53 @@ function ImageTab() {
         </div>
       </div>
 
-      {/* Image Text */}
-      <div className="form-control">
-        <label className="label py-1">
-          <span className="label-text select-text text-xs">🏷️ ข้อความบนภาพ <span className="opacity-50">(ถ้าเว้นไว้ AI จะคิดให้เอง)</span></span>
-        </label>
-        <textarea
-          placeholder="พิมพ์ข้อความเอง หรือกด AI วิเคราะห์"
-          className="textarea textarea-bordered textarea-sm h-16"
-          value={imageText}
-          onChange={(e) => setImageText(e.target.value)}
-        />
-        <button className="btn btn-secondary btn-sm mt-1">
-          ✨ วิเคราะห์ข้อความด้วย AI
-        </button>
-      </div>
+      {/* Story mode prompts */}
+      {multiSetMode === 'story' && (
+        <div className="form-control">
+          <label className="label py-1">
+            <span className="label-text select-text text-xs">📝 Prompt <span className="text-error">*</span></span>
+            <span className="label-text-alt text-base-content/50 text-xs">
+              {storyPrompts.length > 1 ? `${storyPrompts.length} ภาพ` : '1 ภาพ'}
+            </span>
+          </label>
+          <div className="space-y-2">
+            {storyPrompts.map((prompt, index) => (
+              <div key={index} className="flex gap-2">
+                <div className="flex-1">
+                  <div className="text-xs text-base-content/50 mb-1">
+                    {index === 0 ? 'ภาพแรก' : `ภาพที่ ${index + 1}`}
+                  </div>
+                  <textarea
+                    className="textarea textarea-bordered w-full text-sm"
+                    rows={2}
+                    placeholder={index === 0 ? "อธิบายภาพที่ต้องการ..." : `ภาพที่ ${index + 1}: อธิบายฉากถัดไป...`}
+                    value={prompt}
+                    onChange={(e) => {
+                      const newPrompts = [...storyPrompts]
+                      newPrompts[index] = e.target.value
+                      setStoryPrompts(newPrompts)
+                    }}
+                  />
+                </div>
+                {storyPrompts.length > 1 && (
+                  <button
+                    className="btn btn-ghost btn-sm btn-square text-error"
+                    onClick={() => setStoryPrompts(prev => prev.filter((_, i) => i !== index))}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <button
+            className="btn btn-ghost btn-sm mt-2"
+            onClick={() => setStoryPrompts(prev => [...prev, ''])}
+          >
+            + เพิ่มภาพ
+          </button>
+        </div>
+      )}
 
       {/* Scene */}
       <div className="form-control">
@@ -704,16 +773,16 @@ function ImageTab() {
         <button
           className="btn btn-primary w-full"
           onClick={handleCreate}
-          disabled={multiSetMode !== 'sameModel'}
+          disabled={multiSetMode !== 'sameModel' && multiSetMode !== 'story'}
         >
           🖼️ สร้างรูปภาพ
         </button>
       )}
 
       {/* Mode hint */}
-      {multiSetMode !== 'sameModel' && (
+      {multiSetMode !== 'sameModel' && multiSetMode !== 'story' && (
         <div className="text-center text-xs text-base-content/50">
-          กรุณาเลือกโหมด "หลายชุดสินค้า นางแบบเดียว" เพื่อใช้งาน
+          กรุณาเลือกโหมด "หลายชุดสินค้า นางแบบเดียว" หรือ "Story Mode" เพื่อใช้งาน
         </div>
       )}
     </div>
