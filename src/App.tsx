@@ -4,11 +4,13 @@ import ImageTab from './tabs/ImageTab'
 import AutoTab from './tabs/AutoTab'
 import FolderTab from './tabs/FolderTab'
 import FollowerTab from './tabs/FollowerTab'
+import SettingsModal from './components/SettingsModal'
 
 type TabType = 'video' | 'image' | 'auto' | 'folder' | 'follower'
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>('video')
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const tabs = [
     { id: 'video' as TabType, label: 'Video', icon: '🎬' },
@@ -25,7 +27,7 @@ function App() {
         <h1 className="text-xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
           ShopEnginX
         </h1>
-        <button className="btn btn-ghost btn-sm">⚙️</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setSettingsOpen(true)}>⚙️</button>
       </div>
 
       {/* Tabs */}
@@ -50,6 +52,7 @@ function App() {
         {activeTab === 'folder' && <FolderTab />}
         {activeTab === 'follower' && <FollowerTab />}
       </div>
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   )
 }

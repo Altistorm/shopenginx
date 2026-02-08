@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, type GeneratedScene } from '../storyPrompts'
 
 // Progress event type from content script
 interface ImageProgressEvent {
@@ -35,6 +36,15 @@ function ImageTab() {
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
   const [storyPrompts, setStoryPrompts] = useState<string[]>([''])
+  const [storyMood, setStoryMood] = useState('tough_love')
+  const [storySceneCount, setStorySceneCount] = useState(4)
+  const [storyTopic, setStoryTopic] = useState('')
+  const [storyAutoWording, setStoryAutoWording] = useState(false)
+  const [storyTitle, setStoryTitle] = useState('')
+  const [storyCharacters, setStoryCharacters] = useState<StoryCharacter[]>([])
+  const [storySceneData, setStorySceneData] = useState<GeneratedScene[]>([])
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiLoadingIndex, setAiLoadingIndex] = useState<number | null>(null)
   const [isRunning, setIsRunning] = useState(false)
 
   const [validationError, setValidationError] = useState<string | null>(null)
@@ -42,6 +52,10 @@ function ImageTab() {
   // Progress state for event-driven workflow
   const [progress, setProgress] = useState<ImageProgressEvent | null>(null)
   const [result, setResult] = useState<{ success: boolean; error?: string; completedSets?: number; totalSets?: number } | null>(null)
+
+  // Story mode progress (sidebar-controlled)
+  const [storyCurrentScene, setStoryCurrentScene] = useState<number | null>(null)
+  const [storyTotalScenes, setStoryTotalScenes] = useState(0)
 
   // Listen for progress updates from content script
   useEffect(() => {
@@ -138,7 +152,61 @@ function ImageTab() {
     setIsRunning(true)
 
     try {
-      if (multiSetMode === 'sameModel' && sharedModelImage) {
+      if (multiSetMode === 'story') {
+        // ==================== Story Mode — Sidebar-Controlled ====================
+        const validPrompts = storyPrompts.filter(p => p.trim())
+        const total = validPrompts.length
+
+        console.log(`[handleCreate] Story mode: ${total} scenes, sidebar-controlled`)
+        setStoryTotalScenes(total)
+
+        // Step 1: Init story mode (once)
+        const initResp = await chrome.tabs.sendMessage(tab.id!, {
+          type: 'INIT_STORY_MODE',
+          aspectRatio,
+          imageCount,
+          totalScenes: total,
+        })
+
+        if (!initResp?.success) {
+          setValidationError(`Init failed: ${initResp?.error || 'Unknown error'}`)
+          setIsRunning(false)
+          return
+        }
+
+        // Step 2: Loop through scenes one at a time
+        let completedScenes = 0
+
+        for (let i = 0; i < total; i++) {
+          setStoryCurrentScene(i + 1)
+
+          const sceneResp = await chrome.tabs.sendMessage(tab.id!, {
+            type: 'CREATE_STORY_SCENE',
+            prompt: validPrompts[i],
+            sceneIndex: i,
+            totalScenes: total,
+            imageCount,
+            autoSaveImage,
+            downloadResolution,
+            isLast: i === total - 1,
+          })
+
+          console.log(`[handleCreate] Scene ${i + 1}/${total} result:`, sceneResp)
+
+          if (sceneResp?.success) {
+            completedScenes++
+          }
+        }
+
+        setStoryCurrentScene(null)
+        setResult({
+          success: completedScenes === total,
+          completedSets: completedScenes,
+          totalSets: total,
+          error: completedScenes < total ? `สร้างได้ ${completedScenes}/${total} ภาพ` : undefined,
+        })
+
+      } else if (multiSetMode === 'sameModel' && sharedModelImage) {
         // ==================== Event-Driven Workflow (sameModel mode) ====================
         const productImagesArray = imageSets.map(set => set.product).filter((p): p is string => p !== null)
 
@@ -226,7 +294,16 @@ function ImageTab() {
 
   const handleMultiSetChange = (mode: 'none' | 'story' | 'multi' | 'sameModel') => {
     setMultiSetMode(mode)
-    if (mode === 'multi') {
+    if (mode === 'story') {
+      // Initialize prompts to match scene count
+      setStoryPrompts(prev => {
+        if (prev.length < storySceneCount) {
+          return [...prev, ...Array(storySceneCount - prev.length).fill('')]
+        }
+        return prev.slice(0, storySceneCount)
+      })
+      setImageSets([])
+    } else if (mode === 'multi') {
       generateSets(setCount, false)
     } else if (mode === 'sameModel') {
       // Create 2 empty product sets for sameModel mode
@@ -234,6 +311,67 @@ function ImageTab() {
       setSharedModelImage(null)
     } else {
       setImageSets([])
+    }
+  }
+
+  // AI: Generate all scene prompts
+  const handleGenerateAll = async () => {
+    setAiLoading(true)
+    setValidationError(null)
+    try {
+      const result = await generateAllScenePrompts({
+        sceneCount: storySceneCount,
+        style,
+        mood: storyMood,
+        topic: storyTopic || undefined,
+        productName: productName || undefined,
+        scene: scene || undefined,
+      })
+
+      // Store full storyboard data
+      setStoryTitle(result.title)
+      setStoryCharacters(result.characters)
+      setStorySceneData(result.scenes)
+
+      // Extract imagePrompts into the prompts array for editing
+      const newPrompts = result.scenes.map(s => s.imagePrompt)
+      // Pad or trim to match scene count
+      while (newPrompts.length < storySceneCount) newPrompts.push('')
+      setStoryPrompts(newPrompts.slice(0, storySceneCount))
+    } catch (err) {
+      setValidationError((err as Error).message)
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  // AI: Generate single prompt
+  const handleGenerateSingle = async (index: number) => {
+    setValidationError(null)
+    const currentText = storyPrompts[index]?.trim()
+    if (!currentText) {
+      setValidationError('กรุณาพิมพ์คำอธิบายสั้นๆ ก่อนกด AI')
+      return
+    }
+    setAiLoadingIndex(index)
+    try {
+      const isFirst = index === 0
+      const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
+      const sceneType = isFirst ? 'hook' as const : isLast ? 'cta' as const : 'story' as const
+
+      const result = await generateSinglePrompt({
+        description: currentText,
+        style,
+        mood: storyMood,
+        sceneType,
+      })
+      const newPrompts = [...storyPrompts]
+      newPrompts[index] = result.trim()
+      setStoryPrompts(newPrompts)
+    } catch (err) {
+      setValidationError((err as Error).message)
+    } finally {
+      setAiLoadingIndex(null)
     }
   }
 
@@ -548,6 +686,12 @@ function ImageTab() {
             <option value="luxury">หรูหรา</option>
             <option value="dance">💃 เต้น K-pop</option>
             <option value="object_talk">🗣️ Object Talk</option>
+            <option disabled>──── Story Styles ────</option>
+            <option value="pixar_3d">🎬 Pixar 3D</option>
+            <option value="anime">🌸 Anime</option>
+            <option value="cartoon_2d">✏️ Cartoon 2D</option>
+            <option value="watercolor">🎨 Watercolor</option>
+            <option value="realistic">📷 Realistic / Cinematic</option>
           </select>
         </div>
         <div className="form-control">
@@ -615,51 +759,179 @@ function ImageTab() {
         </div>
       </div>
 
-      {/* Story mode prompts */}
+      {/* Story mode settings + prompts */}
       {multiSetMode === 'story' && (
-        <div className="form-control">
-          <label className="label py-1">
-            <span className="label-text select-text text-xs">📝 Prompt <span className="text-error">*</span></span>
-            <span className="label-text-alt text-base-content/50 text-xs">
-              {storyPrompts.length > 1 ? `${storyPrompts.length} ภาพ` : '1 ภาพ'}
-            </span>
-          </label>
-          <div className="space-y-2">
-            {storyPrompts.map((prompt, index) => (
-              <div key={index} className="flex gap-2">
-                <div className="flex-1">
-                  <div className="text-xs text-base-content/50 mb-1">
-                    {index === 0 ? 'ภาพแรก' : `ภาพที่ ${index + 1}`}
-                  </div>
-                  <textarea
-                    className="textarea textarea-bordered w-full text-sm"
-                    rows={2}
-                    placeholder={index === 0 ? "อธิบายภาพที่ต้องการ..." : `ภาพที่ ${index + 1}: อธิบายฉากถัดไป...`}
-                    value={prompt}
-                    onChange={(e) => {
-                      const newPrompts = [...storyPrompts]
-                      newPrompts[index] = e.target.value
-                      setStoryPrompts(newPrompts)
-                    }}
-                  />
-                </div>
-                {storyPrompts.length > 1 && (
-                  <button
-                    className="btn btn-ghost btn-sm btn-square text-error"
-                    onClick={() => setStoryPrompts(prev => prev.filter((_, i) => i !== index))}
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-            ))}
+        <div className="space-y-2">
+          {/* Mood + Scene count row */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="form-control">
+              <label className="label py-1">
+                <span className="label-text select-text text-xs">🎭 โทนเสียง/Mood</span>
+              </label>
+              <select
+                className="select select-bordered select-sm"
+                value={storyMood}
+                onChange={(e) => setStoryMood(e.target.value)}
+              >
+                <option disabled>──── ทั่วไป ────</option>
+                <option value="tough_love">💪 Tough Love</option>
+                <option value="funny">😂 ตลก ขำๆ</option>
+                <option value="exciting">🔥 ตื่นเต้น ลุ้น</option>
+                <option value="scary">👻 สยองขวัญ ลึกลับ</option>
+                <option value="cute">🥰 น่ารัก อบอุ่น</option>
+                <option value="serious">📚 จริงจัง ให้ความรู้</option>
+                <option value="sarcastic">😏 ประชด เสียดสี</option>
+                <option disabled>──── ดุดัน ────</option>
+                <option value="aggressive">😤 ดุดัน กระแทกใจ</option>
+                <option value="scolding">👵 บ่น ดุเบาๆ</option>
+                <option value="troll">😈 กวนตีน แซวจิกกัด</option>
+                <option disabled>──── 18+ ────</option>
+                <option value="crude">🤬 หยาบ 18+</option>
+                <option disabled>──── ภาษาถิ่น ────</option>
+                <option value="isan">🌾 อีสาน</option>
+                <option value="isan_crude">🌾🤬 อีสาน หยาบ 18+</option>
+                <option value="southern">🌊 ใต้</option>
+                <option value="southern_crude">🌊🤬 ใต้ หยาบ 18+</option>
+                <option value="northern">🏔️ เหนือ</option>
+                <option value="northern_crude">🏔️🤬 เหนือ หยาบ 18+</option>
+              </select>
+            </div>
+            <div className="form-control">
+              <label className="label py-1">
+                <span className="label-text select-text text-xs">🖼️ จำนวนภาพ</span>
+              </label>
+              <select
+                className="select select-bordered select-sm"
+                value={storySceneCount}
+                onChange={(e) => {
+                  const count = parseInt(e.target.value)
+                  setStorySceneCount(count)
+                  // Resize prompts array to match scene count
+                  setStoryPrompts(prev => {
+                    if (prev.length < count) {
+                      return [...prev, ...Array(count - prev.length).fill('')]
+                    }
+                    return prev.slice(0, count)
+                  })
+                }}
+              >
+                {[2, 3, 4, 5, 6, 7, 8].map(n => (
+                  <option key={n} value={n}>{n} ภาพ</option>
+                ))}
+              </select>
+            </div>
           </div>
-          <button
-            className="btn btn-ghost btn-sm mt-2"
-            onClick={() => setStoryPrompts(prev => [...prev, ''])}
-          >
-            + เพิ่มภาพ
-          </button>
+
+          {/* Auto wording + AI generate all */}
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-2 cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                className="checkbox checkbox-secondary checkbox-sm"
+                checked={storyAutoWording}
+                onChange={(e) => setStoryAutoWording(e.target.checked)}
+              />
+              <span className="text-xs select-text">Auto</span>
+            </label>
+            <button
+              className="btn btn-secondary btn-sm gap-1 flex-1"
+              onClick={handleGenerateAll}
+              disabled={aiLoading}
+            >
+              {aiLoading && aiLoadingIndex === null ? '⏳ กำลังสร้าง...' : '✨ สร้างทั้งหมดด้วย AI'}
+            </button>
+          </div>
+
+          {/* Topic */}
+          <div className="form-control">
+            <label className="label py-1">
+              <span className="label-text select-text text-xs">💡 หัวข้อเรื่อง <span className="opacity-50">(ไม่บังคับ)</span></span>
+            </label>
+            <input
+              type="text"
+              placeholder="เช่น: ยาสีฟันผู้กล้าปะทะแบคทีเรียฟันผุ"
+              className="input input-bordered input-sm"
+              value={storyTopic}
+              onChange={(e) => setStoryTopic(e.target.value)}
+            />
+          </div>
+
+          {/* Prompt textareas */}
+          <div className="form-control">
+            <label className="label py-1">
+              <span className="label-text select-text text-xs">📝 Prompt <span className="text-error">*</span></span>
+              <span className="label-text-alt text-base-content/50 text-xs">
+                {storyPrompts.length} ภาพ
+              </span>
+            </label>
+            <div className="space-y-2">
+              {storyPrompts.map((prompt, index) => {
+                const isFirst = index === 0
+                const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
+                const sceneType = isFirst ? 'Hook' : isLast ? 'CTA' : 'Story'
+                const sceneLabel = isFirst
+                  ? `ภาพที่ 1 (${sceneType})`
+                  : isLast
+                    ? `ภาพที่ ${index + 1} (${sceneType})`
+                    : `ภาพที่ ${index + 1} (${sceneType})`
+                const placeholder = isFirst
+                  ? 'ฉากเปิด ดึงดูดสายตา เช่น ตัวละครแสดงอารมณ์ชัดเจน'
+                  : isLast
+                    ? 'ปิดเรื่อง เช่น สรุป/ชวนติดตาม'
+                    : 'เล่าเรื่องต่อ เช่น ตัวละครเจอปัญหา/แก้ปัญหา'
+
+                return (
+                  <div key={index} className="flex gap-2">
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className={`text-xs font-medium ${isFirst ? 'text-warning' : isLast ? 'text-success' : 'text-base-content/50'}`}>
+                          {sceneLabel}
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-xs gap-1 text-secondary"
+                          title="สร้าง Prompt ด้วย AI"
+                          onClick={() => handleGenerateSingle(index)}
+                          disabled={aiLoadingIndex === index}
+                        >
+                          {aiLoadingIndex === index ? '⏳' : '✨'}
+                        </button>
+                      </div>
+                      {storySceneData[index]?.description && (
+                        <div className="text-xs text-base-content/40 mb-1 pl-1">{storySceneData[index].description}</div>
+                      )}
+                      <textarea
+                        className="textarea textarea-bordered w-full text-sm"
+                        rows={2}
+                        placeholder={placeholder}
+                        value={prompt}
+                        onChange={(e) => {
+                          const newPrompts = [...storyPrompts]
+                          newPrompts[index] = e.target.value
+                          setStoryPrompts(newPrompts)
+                        }}
+                      />
+                    </div>
+                    {storyPrompts.length > 2 && (
+                      <button
+                        className="btn btn-ghost btn-sm btn-square text-error self-end mb-1"
+                        onClick={() => setStoryPrompts(prev => prev.filter((_, i) => i !== index))}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            {storyPrompts.length < 8 && (
+              <button
+                className="btn btn-ghost btn-sm mt-2"
+                onClick={() => setStoryPrompts(prev => [...prev, ''])}
+              >
+                + เพิ่มภาพ
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -713,6 +985,19 @@ function ImageTab() {
         </div>
 
       </div>
+
+      {/* Story Progress Display */}
+      {storyCurrentScene !== null && (
+        <div className="alert alert-info py-2">
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <span className="loading loading-spinner loading-sm"></span>
+              <span className="font-medium text-sm">📖 กำลังสร้างภาพที่ {storyCurrentScene}/{storyTotalScenes}</span>
+            </div>
+            <progress className="progress progress-primary w-full mt-1" value={storyCurrentScene - 1} max={storyTotalScenes}></progress>
+          </div>
+        </div>
+      )}
 
       {/* Progress Display */}
       {progress && (

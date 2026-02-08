@@ -3380,6 +3380,89 @@ class ImageFlowController {
       };
     }
   }
+
+  /**
+   * Initialize story mode — called once before the first scene.
+   * Sets up create image mode and configures aspect ratio / image count.
+   */
+  async initStoryMode(aspectRatio: '9:16' | '16:9', imageCount: number, totalScenes: number): Promise<void> {
+    this.workflowTimestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+    console.log('[ImageFlowController] Story mode init, timestamp:', this.workflowTimestamp);
+
+    const initialUUIDsList = await this.collectAllImageUUIDs();
+    this.initialUUIDs = new Set(initialUUIDsList);
+    console.log('[ImageFlowController] Initial UUIDs collected:', this.initialUUIDs.size);
+
+    await this.executeStep('ensureCreateImageMode', () => this.ensureCreateImageMode(), 0, totalScenes);
+    await this.executeStep('configureSettings', () => this.configureSettings(aspectRatio, imageCount), 0, totalScenes);
+  }
+
+  /**
+   * Execute a single story scene — sidebar calls this once per prompt.
+   * Returns the number of images generated (0 on failure).
+   */
+  async executeStoryScene(
+    prompt: string,
+    sceneIndex: number,
+    totalScenes: number,
+    imageCount: number,
+    autoSaveImage: boolean,
+    downloadResolution: '1K' | '2K' | '4K',
+    isLast: boolean,
+  ): Promise<{ success: boolean; imagesCreated: number; error?: string }> {
+    console.log(`[ImageFlowController] Story scene ${sceneIndex + 1}/${totalScenes}`);
+
+    try {
+      // Fill prompt text
+      await this.executeStep('fillPrompt', () => this.fillPrompt(prompt), sceneIndex, totalScenes);
+
+      // Click Create and wait for generation
+      await this.executeStep('clickCreate', () => this.clickCreate(), sceneIndex, totalScenes);
+
+      let newUUIDs: string[] = [];
+      await this.executeStep('waitForGeneration', async () => {
+        newUUIDs = await this.waitForGeneration(imageCount);
+      }, sceneIndex, totalScenes);
+
+      // Track new UUIDs
+      newUUIDs.forEach(uuid => this.initialUUIDs.add(uuid));
+
+      // Download if enabled
+      if (autoSaveImage && newUUIDs.length > 0) {
+        await this.executeStep('downloadImages', async () => {
+          await this.downloadImages(newUUIDs, downloadResolution);
+        }, sceneIndex, totalScenes);
+      }
+
+      // Clear prompt box for next scene (not last)
+      if (!isLast) {
+        await this.executeStep('clearPromptBox', () => this.clearPromptBox(), sceneIndex, totalScenes);
+      }
+
+      // Stop tracker on last scene
+      if (isLast) {
+        flowImageTracker.stop();
+      }
+
+      return { success: true, imagesCreated: newUUIDs.length };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[ImageFlowController] Story scene ${sceneIndex + 1} failed:`, errorMsg);
+
+      // Clear prompt box so next scene can start fresh (if not last)
+      if (!isLast) {
+        try {
+          await this.executeStep('clearPromptBox', () => this.clearPromptBox(), sceneIndex, totalScenes);
+        } catch { /* ignore cleanup error */ }
+      }
+
+      if (isLast) {
+        flowImageTracker.stop();
+      }
+
+      return { success: false, imagesCreated: 0, error: errorMsg };
+    }
+  }
 }
 
 // Global instance
@@ -4793,6 +4876,82 @@ const videoConfig: VideoSetConfig = {
       })();
       return true; // Keep message channel open for async response
 
+    case 'INIT_STORY_MODE':
+      // Called once before the first scene — creates controller, sets up Google Flow
+      (async () => {
+        try {
+          const aspectRatio = message.aspectRatio || '9:16';
+          const imageCount = message.imageCount || 4;
+          const totalScenes = message.totalScenes || 1;
+
+          console.log('[INIT_STORY_MODE] Initializing:', { aspectRatio, imageCount, totalScenes });
+
+          // Cleanup existing controller if any
+          if (imageFlowController) {
+            imageFlowController.destroy();
+          }
+
+          imageFlowController = new ImageFlowController(
+            message.stepConfig,
+            (event: ImageProgressEvent) => {
+              console.log('[INIT_STORY_MODE] Progress:', event);
+            }
+          );
+
+          await imageFlowController.initStoryMode(aspectRatio, imageCount, totalScenes);
+          console.log('[INIT_STORY_MODE] Ready');
+          sendResponse({ success: true });
+        } catch (e) {
+          console.log('[INIT_STORY_MODE] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+          if (imageFlowController) {
+            imageFlowController.destroy();
+            imageFlowController = null;
+          }
+        }
+      })();
+      return true;
+
+    case 'CREATE_STORY_SCENE':
+      // Called once per scene — fills prompt, generates, downloads, clears for next
+      (async () => {
+        try {
+          if (!imageFlowController) {
+            sendResponse({ success: false, error: 'No active story controller. Call INIT_STORY_MODE first.' });
+            return;
+          }
+
+          const prompt = message.prompt || '';
+          const sceneIndex = message.sceneIndex ?? 0;
+          const totalScenes = message.totalScenes ?? 1;
+          const imageCount = message.imageCount ?? 4;
+          const autoSaveImage = message.autoSaveImage ?? true;
+          const downloadResolution = message.downloadResolution || '1K';
+          const isLast = message.isLast ?? false;
+
+          console.log(`[CREATE_STORY_SCENE] Scene ${sceneIndex + 1}/${totalScenes}, isLast=${isLast}`);
+
+          const result = await imageFlowController.executeStoryScene(
+            prompt, sceneIndex, totalScenes, imageCount, autoSaveImage, downloadResolution, isLast
+          );
+
+          console.log(`[CREATE_STORY_SCENE] Scene ${sceneIndex + 1} result:`, result);
+
+          // Cleanup controller after last scene
+          if (isLast) {
+            imageFlowController.destroy();
+            imageFlowController = null;
+          }
+
+          sendResponse(result);
+        } catch (e) {
+          console.log('[CREATE_STORY_SCENE] Error:', e);
+          sendResponse({ success: false, imagesCreated: 0, error: String(e) });
+        }
+      })();
+      return true;
+
+    // Note: STOP_IMAGE_WORKFLOW also stops story workflows since both use the same imageFlowController
     case 'STOP_IMAGE_WORKFLOW':
       try {
         if (imageFlowController) {
