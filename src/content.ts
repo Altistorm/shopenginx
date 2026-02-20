@@ -1979,13 +1979,9 @@ class VideoFlowController {
         const downloadLink = notification.querySelector('a') as HTMLAnchorElement | null;
         if (downloadLink) {
           if (this.downloadToFolder) {
-            // Intercept onclick to capture data URI and save to ShopEnginX/ folder
-            console.log('[VideoFlowController] Intercepting download for ShopEnginX/ folder');
-            const intercepted = await this.interceptDownloadToFolder(downloadLink);
-            if (!intercepted) {
-              console.log('[VideoFlowController] Intercept failed, falling back to direct click');
-              downloadLink.click();
-            }
+            // Arm background to redirect next .mp4 download to ShopEnginX/, then click
+            console.log('[VideoFlowController] Arming download redirect to ShopEnginX/');
+            await this.armAndClickDownload(downloadLink);
           } else {
             // Default: just click (downloads to browser default location)
             console.log('[VideoFlowController] Clicking Download link in export notification');
@@ -2370,35 +2366,20 @@ class VideoFlowController {
   }
 
   /**
-   * Intercept the notification's Download <a> onclick handler to capture
-   * the data: URI and original filename, then re-download via chrome.downloads
-   * to the ShopEnginX/ subfolder.
-   *
-   * Delegates to the background script which uses chrome.scripting.executeScript
-   * with world: 'MAIN' to access React props (bypasses CSP and content script isolation).
-   *
-   * Returns true if the download was intercepted, false if fallback is needed.
+   * Arm the background script to redirect the next .mp4 download to ShopEnginX/ subfolder,
+   * then click the download link. The background's onDeterminingFilename listener handles
+   * the actual filename redirect — no need to capture data URIs or use MAIN world scripts.
    */
-  private async interceptDownloadToFolder(_downloadLink: HTMLAnchorElement): Promise<boolean> {
+  private async armAndClickDownload(downloadLink: HTMLAnchorElement): Promise<void> {
     try {
-      const response = await new Promise<{ success: boolean; error?: string; filename?: string }>((resolve) => {
-        chrome.runtime.sendMessage({
-          action: 'interceptVideoDownload',
-          tabId: null, // background will use sender.tab.id
-        }, resolve);
+      await new Promise<{ success: boolean }>((resolve) => {
+        chrome.runtime.sendMessage({ action: 'armDownloadToFolder' }, resolve);
       });
-
-      if (response?.success) {
-        console.log(`[VideoFlowController] Video download intercepted: ${response.filename}`);
-        return true;
-      } else {
-        console.warn('[VideoFlowController] Intercept failed:', response?.error);
-        return false;
-      }
+      console.log('[VideoFlowController] Background armed, clicking download link');
     } catch (error) {
-      console.error('[VideoFlowController] Intercept message error:', error);
-      return false;
+      console.warn('[VideoFlowController] Failed to arm background, downloading to default location:', error);
     }
+    downloadLink.click();
   }
 
   /**
@@ -2456,14 +2437,9 @@ class VideoFlowController {
             downloadLink.click();
           }
         } else if (this.downloadToFolder) {
-          // No href + downloadToFolder flag — intercept onclick to capture data URI
-          // and re-download to ShopEnginX/ folder via chrome.downloads
-          console.log('[VideoFlowController] Intercepting download for ShopEnginX/ folder');
-          const intercepted = await this.interceptDownloadToFolder(downloadLink);
-          if (!intercepted) {
-            console.log('[VideoFlowController] Intercept failed, falling back to direct click');
-            downloadLink.click();
-          }
+          // No href + downloadToFolder flag — arm background to redirect to ShopEnginX/
+          console.log('[VideoFlowController] Arming download redirect to ShopEnginX/');
+          await this.armAndClickDownload(downloadLink);
         } else {
           // No href, no flag — just click (downloads to browser default location)
           console.log('[VideoFlowController] Clicking Download link in notification (onclick handler)');

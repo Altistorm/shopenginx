@@ -330,99 +330,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Intercept video download: run script in page's MAIN world to capture data URI from React onClick,
-  // then download to ShopEnginX/ folder via chrome.downloads.
-  // This bypasses CSP restrictions that block inline <script> injection from content scripts.
-  if (message.action === 'interceptVideoDownload') {
-    const tabId = sender.tab?.id;
-    if (!tabId) {
-      sendResponse({ success: false, error: 'no tab id from sender' });
-      return true;
-    }
-
-    (async () => {
-      try {
-        console.log('[Background] Intercepting video download in main world, tabId:', tabId);
-
-        // Execute in the page's MAIN world to access React props
-        const results = await chrome.scripting.executeScript({
-          target: { tabId },
-          world: 'MAIN',
-          func: () => {
-            return new Promise<{ capturedHref: string | null; capturedFilename: string | null; error?: string }>((resolve) => {
-              try {
-                const toast = document.querySelector('[data-sonner-toast]');
-                if (!toast) { resolve({ capturedHref: null, capturedFilename: null, error: 'no toast' }); return; }
-                const link = toast.querySelector('a');
-                if (!link) { resolve({ capturedHref: null, capturedFilename: null, error: 'no link' }); return; }
-
-                const propsKey = Object.keys(link).find((k) => k.indexOf('__reactProps$') === 0);
-                if (!propsKey) { resolve({ capturedHref: null, capturedFilename: null, error: 'no reactProps' }); return; }
-                const onClick = (link as Record<string, any>)[propsKey]?.onClick;
-                if (!onClick) { resolve({ capturedHref: null, capturedFilename: null, error: 'no onClick' }); return; }
-
-                let capturedHref: string | null = null;
-                let capturedFilename: string | null = null;
-                const origCreate = document.createElement.bind(document);
-
-                (document as any).createElement = function(tag: string, opts?: ElementCreationOptions) {
-                  const el = origCreate(tag, opts);
-                  if (tag.toLowerCase() === 'a') {
-                    const origClick = el.click.bind(el);
-                    el.click = function() {
-                      const anchor = el as HTMLAnchorElement;
-                      if (anchor.href && anchor.href.indexOf('data:') === 0) {
-                        capturedHref = anchor.href;
-                        capturedFilename = anchor.download || null;
-                        // Block original download
-                      } else {
-                        origClick();
-                      }
-                    };
-                  }
-                  return el;
-                };
-
-                onClick();
-
-                setTimeout(() => {
-                  (document as any).createElement = origCreate;
-                  resolve({ capturedHref, capturedFilename });
-                }, 3000);
-              } catch (e) {
-                resolve({ capturedHref: null, capturedFilename: null, error: String(e) });
-              }
-            });
-          },
-        });
-
-        const result = results?.[0]?.result;
-        if (!result || result.error || !result.capturedHref || !result.capturedFilename) {
-          console.warn('[Background] Main-world intercept failed:', result?.error || 'no data');
-          sendResponse({ success: false, error: result?.error || 'no data captured' });
-          return;
-        }
-
-        console.log(`[Background] Captured: ${result.capturedFilename}, downloading to ShopEnginX/`);
-
-        // Download the data URI directly via chrome.downloads
-        const fullFilename = `ShopEnginX/${result.capturedFilename}`;
-        const downloadId = await chrome.downloads.download({
-          url: result.capturedHref,
-          filename: fullFilename,
-          saveAs: false,
-        });
-
-        console.log('[Background] Video download started:', { downloadId, filename: fullFilename });
-        sendResponse({ success: true, downloadId, filename: fullFilename });
-      } catch (error) {
-        console.error('[Background] Intercept video download error:', error);
-        sendResponse({ success: false, error: String(error) });
-      }
-    })();
-
-    return true;
+  // Arm the download-to-folder redirect: the next .mp4 download will be saved to ShopEnginX/ subfolder
+  // via the onDeterminingFilename listener below. Content script sends this before clicking the download link.
+  if (message.action === 'armDownloadToFolder') {
+    downloadToFolderArmed = true;
+    // Auto-disarm after 60 seconds (safety net)
+    if (downloadToFolderTimer) clearTimeout(downloadToFolderTimer);
+    downloadToFolderTimer = setTimeout(() => { downloadToFolderArmed = false; }, 60000);
+    console.log('[Background] Download-to-folder armed (next .mp4 will go to ShopEnginX/)');
+    sendResponse({ success: true });
+    return false;
   }
 })
+
+// ─── Download-to-folder: redirect .mp4 downloads to ShopEnginX/ subfolder ───
+// When armed by the content script, the next video download gets its filename
+// prefixed with "ShopEnginX/" so it lands in that subfolder under Downloads.
+let downloadToFolderArmed = false;
+let downloadToFolderTimer: ReturnType<typeof setTimeout> | null = null;
+
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  if (downloadToFolderArmed && downloadItem.filename.endsWith('.mp4')) {
+    downloadToFolderArmed = false;
+    if (downloadToFolderTimer) { clearTimeout(downloadToFolderTimer); downloadToFolderTimer = null; }
+    const redirected = `ShopEnginX/${downloadItem.filename}`;
+    console.log(`[Background] Redirecting download to: ${redirected}`);
+    suggest({ filename: redirected, conflictAction: 'uniquify' });
+  } else {
+    suggest();
+  }
+});
 
 console.log('ShopEnginX background service worker loaded')
