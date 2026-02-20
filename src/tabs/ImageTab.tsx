@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, type GeneratedScene } from '../storyPrompts'
+import { useVideoWorkflow, type SceneData } from '../hooks/useVideoWorkflow'
 
 // Progress event type from content script
 interface ImageProgressEvent {
@@ -21,22 +22,28 @@ interface ImageSet {
 
 function ImageTab() {
   const [images, setImages] = useState<string[]>([])
-  const [style, setStyle] = useState('tiktok_real')
+  const [style, setStyle] = useState('object_talk')
   const [productName, setProductName] = useState('')
   const [modelType, setModelType] = useState('from_image')
-  const [multiSetMode, setMultiSetMode] = useState<'none' | 'story' | 'multi' | 'sameModel'>('none')
+  const [multiSetMode, setMultiSetMode] = useState<'none' | 'story' | 'multi' | 'sameModel'>('story')
   const [setCount, setSetCount] = useState(2)
   const [imageSets, setImageSets] = useState<ImageSet[]>([])
   const [sharedModelImage, setSharedModelImage] = useState<string | null>(null)
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16')
-  const [imageCount, setImageCount] = useState(4)
+  const [imageCount, setImageCount] = useState(1)
   const [noTextOnImage, setNoTextOnImage] = useState(false)
   const [autoSaveImage, setAutoSaveImage] = useState(true)
+  const [downloadToFolder, setDownloadToFolder] = useState(true)
   const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('1K')
+  const [autoGenerateVideo, setAutoGenerateVideo] = useState(false)
+  const [videoExtensionMode, setVideoExtensionMode] = useState(false)
+  const [videoPrompts, setVideoPrompts] = useState<string[]>([])
+  const [videoScripts, setVideoScripts] = useState<string[]>([])
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
   const [storyPrompts, setStoryPrompts] = useState<string[]>([''])
-  const [storyMood, setStoryMood] = useState('tough_love')
+  const [referenceStyle, setReferenceStyle] = useState('pixar_3d')
+  const [storyMood, setStoryMood] = useState('grumpy')
   const [storySceneCount, setStorySceneCount] = useState(4)
   const [storyTopic, setStoryTopic] = useState('')
   const [storyAutoWording, setStoryAutoWording] = useState(false)
@@ -56,6 +63,16 @@ function ImageTab() {
   // Story mode progress (sidebar-controlled)
   const [storyCurrentScene, setStoryCurrentScene] = useState<number | null>(null)
   const [storyTotalScenes, setStoryTotalScenes] = useState(0)
+  const [showCharacterModal, setShowCharacterModal] = useState(false)
+
+  // Shared video workflow hook (for auto-generate video)
+  const {
+    startVideo,
+    isRunning: videoIsRunning,
+    currentImageIndex: videoCurrentIndex,
+    imageStatuses: videoImageStatuses,
+  } = useVideoWorkflow()
+  const [showJsonModal, setShowJsonModal] = useState(false)
 
   // Listen for progress updates from content script
   useEffect(() => {
@@ -174,36 +191,126 @@ function ImageTab() {
           return
         }
 
+         // Build character reference text (appended to every prompt)
+        let charRefText = ''
+        if (storyCharacters.length > 0) {
+          const charDesc = storyCharacters.map(c => `${c.name}: ${c.appearance}`).join('; ')
+          charRefText = `\n\n[Character Reference: ${charDesc}]`
+        }
+
+        // Instruction for scenes 2+ when a reference image ingredient is uploaded.
+        // Without this, Google Flow copies the entire scene 1 (background, composition, pose)
+        // instead of only matching the character appearance.
+        const ingredientInstruction = `\n\n[IMPORTANT: The ingredient image is ONLY a reference for character appearance and art style/tone consistency. Do NOT copy its background, composition, camera angle, or pose. Generate a completely NEW scene with a DIFFERENT background and setting as described in this prompt. Match the characters and visual tone only.]`
+
         // Step 2: Loop through scenes one at a time
         let completedScenes = 0
+        let autoCharRefUuid: string | null = null  // scene 1's image UUID for "Add To Prompt" reference
+        let autoCharRef: string | null = null      // scene 1's image base64 (legacy fallback)
+        const scenes: SceneData[] = []
 
         for (let i = 0; i < total; i++) {
           setStoryCurrentScene(i + 1)
 
-          const sceneResp = await chrome.tabs.sendMessage(tab.id!, {
-            type: 'CREATE_STORY_SCENE',
-            prompt: validPrompts[i],
-            sceneIndex: i,
-            totalScenes: total,
-            imageCount,
-            autoSaveImage,
-            downloadResolution,
-            isLast: i === total - 1,
-          })
+          // Capture scene 1 always (for char ref), capture all if autoGenerateVideo
+          const shouldCapture = i === 0 || autoGenerateVideo
+
+          const sceneResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
+            await chrome.tabs.sendMessage(tab.id!, {
+              type: 'CREATE_STORY_SCENE',
+              prompt: validPrompts[i] + charRefText + (i > 0 ? ingredientInstruction : ''),
+              sceneIndex: i,
+              totalScenes: total,
+              imageCount,
+              autoSaveImage,
+              downloadResolution,
+              isLast: !autoGenerateVideo && i === total - 1,  // if video follows, don't cleanup on last image scene
+              referenceImageUuid: i > 0 ? autoCharRefUuid : undefined,
+              referenceImage: i > 0 && !autoCharRefUuid ? autoCharRef : undefined,  // legacy fallback
+              captureImage: shouldCapture,
+            })
 
           console.log(`[handleCreate] Scene ${i + 1}/${total} result:`, sceneResp)
 
           if (sceneResp?.success) {
             completedScenes++
+            // Prefer UUID for "Add To Prompt" (no upload needed), fall back to base64
+            if (i === 0 && sceneResp.imageUUIDs?.[0]) {
+              autoCharRefUuid = sceneResp.imageUUIDs[0]
+              console.log(`[handleCreate] Saved scene 1 image UUID for reference: ${autoCharRefUuid}`)
+            }
+            if (i === 0 && sceneResp.imageBase64) {
+              autoCharRef = sceneResp.imageBase64
+              console.log(`[handleCreate] Saved scene 1 base64 as fallback reference (${Math.round(autoCharRef!.length / 1024)}KB)`)
+            }
+            // Collect scene data for video generation
+            if (autoGenerateVideo && sceneResp.imageBase64) {
+              const vp = videoPrompts[i]?.trim() || storySceneData[i]?.videoPrompt || validPrompts[i]
+              const script = videoScripts[i]?.trim() || storySceneData[i]?.script || ''
+              const fullVideoPrompt = script ? `${vp}\n\nScript: "${script}"` : vp
+              scenes.push({
+                sceneIndex: i,
+                imagePrompt: validPrompts[i],
+                imageUuid: sceneResp.imageUUIDs?.[0],
+                imageBase64: sceneResp.imageBase64,
+                videoPrompt: fullVideoPrompt,
+                script,
+                imageCreated: true,
+                videoCreated: false,
+                addedToScene: false,
+              })
+            }
           }
         }
 
         setStoryCurrentScene(null)
+
+        // Step 3: Auto-generate videos if enabled (using shared hook)
+        let completedVideos = 0
+        let videoTotal = 0
+        if (autoGenerateVideo && scenes.length > 0) {
+          // Use "Add To Prompt" flow if UUIDs are available (same project, no upload needed)
+          const hasUuids = scenes.some(s => s.imageUuid)
+
+          const videoJobs = videoExtensionMode
+            ? [{
+                // Extension mode: 1 video, all prompts as extensions (~8s + 7s per extension)
+                image: hasUuids ? null : (scenes[0].imageBase64 as string | null),
+                imageUuid: scenes[0].imageUuid,
+                prompts: scenes.map(s => s.videoPrompt),
+              }]
+            : scenes.map(s => ({
+                // Normal mode: separate video per scene (~8s each)
+                image: hasUuids ? null : (s.imageBase64 as string | null),
+                imageUuid: s.imageUuid,
+                prompts: [s.videoPrompt],
+              }))
+
+          console.log(`[handleCreate] Video generation: ${videoExtensionMode ? 'extension' : 'separate'} mode, ${videoJobs.length} job(s) via useVideoWorkflow, continueFromCurrent=${hasUuids}`)
+
+          const videoResult = await startVideo(videoJobs, {
+            aspectRatio,
+            videoCount: 1,
+            autoDownload: autoSaveImage,
+            downloadToFolder,
+            continueFromCurrent: hasUuids,
+            // Pass ordered prompts so "add to scene" can match videos by prompt text
+            scenePromptsInOrder: !videoExtensionMode ? scenes.map(s => s.videoPrompt) : undefined,
+          })
+
+          completedVideos = videoResult.completedCount
+          videoTotal = videoResult.totalCount
+        }
+
         setResult({
-          success: completedScenes === total,
+          success: completedScenes === total && (!autoGenerateVideo || completedVideos === videoTotal),
           completedSets: completedScenes,
           totalSets: total,
-          error: completedScenes < total ? `สร้างได้ ${completedScenes}/${total} ภาพ` : undefined,
+          error: completedScenes < total
+            ? `สร้างได้ ${completedScenes}/${total} ภาพ`
+            : autoGenerateVideo && completedVideos < videoTotal
+              ? `ภาพครบ ${total}/${total} | วิดีโอ ${completedVideos}/${videoTotal}`
+              : undefined,
         })
 
       } else if (multiSetMode === 'sameModel' && sharedModelImage) {
@@ -295,13 +402,23 @@ function ImageTab() {
   const handleMultiSetChange = (mode: 'none' | 'story' | 'multi' | 'sameModel') => {
     setMultiSetMode(mode)
     if (mode === 'story') {
-      // Initialize prompts to match scene count
+      // Initialize prompts to match scene count, default 1 image per scene
       setStoryPrompts(prev => {
         if (prev.length < storySceneCount) {
           return [...prev, ...Array(storySceneCount - prev.length).fill('')]
         }
         return prev.slice(0, storySceneCount)
       })
+      // Initialize video prompts/scripts to match scene count
+      setVideoPrompts(prev => {
+        if (prev.length < storySceneCount) return [...prev, ...Array(storySceneCount - prev.length).fill('')]
+        return prev.slice(0, storySceneCount)
+      })
+      setVideoScripts(prev => {
+        if (prev.length < storySceneCount) return [...prev, ...Array(storySceneCount - prev.length).fill('')]
+        return prev.slice(0, storySceneCount)
+      })
+      setImageCount(1)
       setImageSets([])
     } else if (mode === 'multi') {
       generateSets(setCount, false)
@@ -323,6 +440,7 @@ function ImageTab() {
         sceneCount: storySceneCount,
         style,
         mood: storyMood,
+        referenceStyle: style === 'object_talk' ? referenceStyle : undefined,
         topic: storyTopic || undefined,
         productName: productName || undefined,
         scene: scene || undefined,
@@ -338,6 +456,15 @@ function ImageTab() {
       // Pad or trim to match scene count
       while (newPrompts.length < storySceneCount) newPrompts.push('')
       setStoryPrompts(newPrompts.slice(0, storySceneCount))
+
+      // Pre-fill video prompts and scripts from AI
+      const newVideoPrompts = result.scenes.map(s => s.videoPrompt || '')
+      while (newVideoPrompts.length < storySceneCount) newVideoPrompts.push('')
+      setVideoPrompts(newVideoPrompts.slice(0, storySceneCount))
+
+      const newVideoScripts = result.scenes.map(s => s.script || '')
+      while (newVideoScripts.length < storySceneCount) newVideoScripts.push('')
+      setVideoScripts(newVideoScripts.slice(0, storySceneCount))
     } catch (err) {
       setValidationError((err as Error).message)
     } finally {
@@ -694,6 +821,24 @@ function ImageTab() {
             <option value="realistic">📷 Realistic / Cinematic</option>
           </select>
         </div>
+        {style === 'object_talk' && (
+          <div className="form-control">
+            <label className="label py-1">
+              <span className="label-text select-text text-xs">🎬 Rendering Style</span>
+            </label>
+            <select
+              className="select select-bordered select-sm"
+              value={referenceStyle}
+              onChange={(e) => setReferenceStyle(e.target.value)}
+            >
+              <option value="pixar_3d">🎬 Pixar 3D</option>
+              <option value="anime">🌸 Anime</option>
+              <option value="cartoon_2d">✏️ Cartoon 2D</option>
+              <option value="watercolor">🎨 Watercolor</option>
+              <option value="realistic">📷 Realistic / Cinematic</option>
+            </select>
+          </div>
+        )}
         <div className="form-control">
           <label className="label py-1">
             <span className="label-text select-text text-xs">🏷️ ชื่อสินค้า</span>
@@ -744,7 +889,7 @@ function ImageTab() {
         </div>
         <div className="form-control">
           <label className="label py-1">
-            <span className="label-text select-text text-xs">🔢 จำนวน</span>
+            <span className="label-text select-text text-xs">🔢 จำนวนภาพ</span>
           </label>
           <select
             className="select select-bordered select-sm"
@@ -783,6 +928,7 @@ function ImageTab() {
                 <option value="sarcastic">😏 ประชด เสียดสี</option>
                 <option disabled>──── ดุดัน ────</option>
                 <option value="aggressive">😤 ดุดัน กระแทกใจ</option>
+                <option value="grumpy">👹 หน้าโหด บ่น ตลก (Pixar Grumpy)</option>
                 <option value="scolding">👵 บ่น ดุเบาๆ</option>
                 <option value="troll">😈 กวนตีน แซวจิกกัด</option>
                 <option disabled>──── 18+ ────</option>
@@ -798,7 +944,7 @@ function ImageTab() {
             </div>
             <div className="form-control">
               <label className="label py-1">
-                <span className="label-text select-text text-xs">🖼️ จำนวนภาพ</span>
+                <span className="label-text select-text text-xs">🖼️ จำนวน Scene</span>
               </label>
               <select
                 className="select select-bordered select-sm"
@@ -811,6 +957,15 @@ function ImageTab() {
                     if (prev.length < count) {
                       return [...prev, ...Array(count - prev.length).fill('')]
                     }
+                    return prev.slice(0, count)
+                  })
+                  // Resize video prompts/scripts to match
+                  setVideoPrompts(prev => {
+                    if (prev.length < count) return [...prev, ...Array(count - prev.length).fill('')]
+                    return prev.slice(0, count)
+                  })
+                  setVideoScripts(prev => {
+                    if (prev.length < count) return [...prev, ...Array(count - prev.length).fill('')]
                     return prev.slice(0, count)
                   })
                 }}
@@ -842,6 +997,29 @@ function ImageTab() {
             </button>
           </div>
 
+          {/* Characters + JSON buttons (shown after AI generates data) */}
+          {(storyCharacters.length > 0 || storySceneData.length > 0) && (
+            <div className="flex items-center gap-2">
+              {storyCharacters.length > 0 && (
+                <button
+                  className="btn btn-ghost btn-xs gap-1"
+                  onClick={() => setShowCharacterModal(true)}
+                >
+                  👥 ตัวละคร ({storyCharacters.length})
+                </button>
+              )}
+              {storySceneData.length > 0 && (
+                <button
+                  className="btn btn-ghost btn-xs gap-1"
+                  onClick={() => setShowJsonModal(true)}
+                  title="ดู JSON ทั้งหมด"
+                >
+                  {'{ }'}
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Topic */}
           <div className="form-control">
             <label className="label py-1">
@@ -857,14 +1035,15 @@ function ImageTab() {
           </div>
 
           {/* Prompt textareas */}
-          <div className="form-control">
-            <label className="label py-1">
+          <div className="collapse collapse-arrow bg-base-300 rounded-lg">
+            <input type="checkbox" defaultChecked />
+            <div className="collapse-title py-2 min-h-0">
               <span className="label-text select-text text-xs">📝 Prompt <span className="text-error">*</span></span>
-              <span className="label-text-alt text-base-content/50 text-xs">
+              <span className="text-base-content/50 text-xs ml-2">
                 {storyPrompts.length} ภาพ
               </span>
-            </label>
-            <div className="space-y-2">
+            </div>
+            <div className="collapse-content space-y-2">
               {storyPrompts.map((prompt, index) => {
                 const isFirst = index === 0
                 const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
@@ -901,7 +1080,7 @@ function ImageTab() {
                       )}
                       <textarea
                         className="textarea textarea-bordered w-full text-sm"
-                        rows={2}
+                        rows={8}
                         placeholder={placeholder}
                         value={prompt}
                         onChange={(e) => {
@@ -922,15 +1101,15 @@ function ImageTab() {
                   </div>
                 )
               })}
+              {storyPrompts.length < 8 && (
+                <button
+                  className="btn btn-ghost btn-sm mt-2"
+                  onClick={() => setStoryPrompts(prev => [...prev, ''])}
+                >
+                  + เพิ่มภาพ
+                </button>
+              )}
             </div>
-            {storyPrompts.length < 8 && (
-              <button
-                className="btn btn-ghost btn-sm mt-2"
-                onClick={() => setStoryPrompts(prev => [...prev, ''])}
-              >
-                + เพิ่มภาพ
-              </button>
-            )}
           </div>
         </div>
       )}
@@ -984,7 +1163,104 @@ function ImageTab() {
           )}
         </div>
 
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+          <input
+            type="checkbox"
+            className="checkbox checkbox-primary checkbox-xs"
+            checked={downloadToFolder}
+            onChange={(e) => setDownloadToFolder(e.target.checked)}
+            disabled={!autoSaveImage}
+          />
+          <span className={`select-text ${!autoSaveImage ? 'opacity-50' : ''}`}>📁 Save to ShopEnginX folder</span>
+        </label>
+
+        {multiSetMode === 'story' && (
+          <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-primary checkbox-xs"
+              checked={autoGenerateVideo}
+              onChange={(e) => setAutoGenerateVideo(e.target.checked)}
+            />
+            <span className="select-text">🎬 สร้างวิดีโอต่ออัตโนมัติ</span>
+          </label>
+        )}
+
+        {multiSetMode === 'story' && autoGenerateVideo && (
+          <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm ml-6">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-secondary checkbox-xs"
+              checked={videoExtensionMode}
+              onChange={(e) => setVideoExtensionMode(e.target.checked)}
+              disabled={isRunning}
+            />
+            <span className="select-text">🔗 Extension Mode (ต่อเป็นวิดีโอเดียว)</span>
+          </label>
+        )}
+
       </div>
+
+      {/* Video Prompts + Scripts per Scene (shown when auto-generate video is checked) */}
+      {multiSetMode === 'story' && autoGenerateVideo && (
+        <div className="collapse collapse-arrow bg-base-300 rounded-lg">
+          <input type="checkbox" defaultChecked />
+          <div className="collapse-title py-2 min-h-0">
+            <span className="label-text select-text text-xs">🎬 Video Prompt & Script per Scene</span>
+          </div>
+          <div className="collapse-content space-y-2">
+            {storyPrompts.map((_, index) => {
+              const isFirst = index === 0
+              const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
+              const sceneType = isFirst ? 'Hook' : isLast ? 'CTA' : 'Story'
+
+              return (
+                <div key={index} className="bg-base-200 rounded-lg p-3 space-y-2">
+                  <div className={`text-xs font-medium ${isFirst ? 'text-warning' : isLast ? 'text-success' : 'text-base-content/50'}`}>
+                    🎬 Scene {index + 1} ({sceneType})
+                  </div>
+
+                  {/* Video Prompt */}
+                  <div>
+                    <div className="text-xs text-base-content/40 mb-1">Video Prompt</div>
+                    <textarea
+                      className="textarea textarea-bordered w-full text-sm"
+                      rows={4}
+                      placeholder={`Video action prompt for scene ${index + 1}...`}
+                      value={videoPrompts[index] || ''}
+                      onChange={(e) => {
+                        const updated = [...videoPrompts]
+                        while (updated.length <= index) updated.push('')
+                        updated[index] = e.target.value
+                        setVideoPrompts(updated)
+                      }}
+                      disabled={isRunning}
+                    />
+                  </div>
+
+                  {/* Script */}
+                  <div>
+                    <div className="text-xs text-base-content/40 mb-1">📝 Script</div>
+                    <textarea
+                      className="textarea textarea-bordered w-full text-sm"
+                      rows={4}
+                      placeholder={`บทพูด/narration สำหรับ scene ${index + 1}...`}
+                      value={videoScripts[index] || ''}
+                      onChange={(e) => {
+                        const updated = [...videoScripts]
+                        while (updated.length <= index) updated.push('')
+                        updated[index] = e.target.value
+                        setVideoScripts(updated)
+                      }}
+                      disabled={isRunning}
+                    />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Story Progress Display */}
       {storyCurrentScene !== null && (
@@ -995,6 +1271,19 @@ function ImageTab() {
               <span className="font-medium text-sm">📖 กำลังสร้างภาพที่ {storyCurrentScene}/{storyTotalScenes}</span>
             </div>
             <progress className="progress progress-primary w-full mt-1" value={storyCurrentScene - 1} max={storyTotalScenes}></progress>
+          </div>
+        </div>
+      )}
+
+      {/* Video Progress Display (from shared hook) */}
+      {videoIsRunning && videoCurrentIndex !== null && (
+        <div className="alert alert-info py-2">
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <span className="loading loading-spinner loading-sm"></span>
+              <span className="font-medium text-sm">🎬 กำลังสร้างวิดีโอที่ {videoCurrentIndex + 1}/{videoImageStatuses.length || '?'}</span>
+            </div>
+            <progress className="progress progress-secondary w-full mt-1" value={videoCurrentIndex} max={videoImageStatuses.length || 1}></progress>
           </div>
         </div>
       )}
@@ -1068,6 +1357,63 @@ function ImageTab() {
       {multiSetMode !== 'sameModel' && multiSetMode !== 'story' && (
         <div className="text-center text-xs text-base-content/50">
           กรุณาเลือกโหมด "หลายชุดสินค้า นางแบบเดียว" หรือ "Story Mode" เพื่อใช้งาน
+        </div>
+      )}
+
+      {/* Character Modal */}
+      {showCharacterModal && (
+        <div className="modal modal-open" onClick={() => setShowCharacterModal(false)}>
+          <div className="modal-box max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-bold text-lg mb-3">👥 ตัวละคร</h3>
+            <div className="space-y-2">
+              {storyCharacters.map((char, i) => (
+                <div key={i} className="bg-base-200 rounded-lg p-3">
+                  <div className="font-medium text-sm">{char.name}</div>
+                  <div className="text-xs text-base-content/60 mt-1">{char.appearance}</div>
+                </div>
+              ))}
+              {storyCharacters.length === 0 && (
+                <div className="text-center text-base-content/50 text-sm py-4">ยังไม่มีข้อมูลตัวละคร</div>
+              )}
+            </div>
+            <div className="modal-action">
+              <button className="btn btn-sm" onClick={() => setShowCharacterModal(false)}>ปิด</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* JSON Modal */}
+      {showJsonModal && (
+        <div className="modal modal-open" onClick={() => setShowJsonModal(false)}>
+          <div className="modal-box max-w-lg" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-lg">{'{ }'} Storyboard JSON</h3>
+              <button
+                className="btn btn-ghost btn-xs"
+                onClick={() => {
+                  navigator.clipboard.writeText(JSON.stringify({
+                    title: storyTitle,
+                    characters: storyCharacters,
+                    scenes: storySceneData,
+                  }, null, 2))
+                }}
+                title="Copy JSON"
+              >
+                📋 Copy
+              </button>
+            </div>
+            <pre className="bg-base-200 rounded-lg p-3 text-xs overflow-auto max-h-96 whitespace-pre-wrap">
+              {JSON.stringify({
+                title: storyTitle,
+                characters: storyCharacters,
+                scenes: storySceneData,
+              }, null, 2)}
+            </pre>
+            <div className="modal-action">
+              <button className="btn btn-sm" onClick={() => setShowJsonModal(false)}>ปิด</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

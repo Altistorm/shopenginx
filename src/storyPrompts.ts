@@ -31,7 +31,8 @@ const MOOD_DESCRIPTIONS: Record<string, string> = {
   cute: 'Cute/Warm tone - adorable characters, heartwarming moments',
   serious: 'Serious/Educational tone - informative, factual, straightforward',
   sarcastic: 'Sarcastic tone - witty commentary, ironic observations',
-  aggressive: 'Aggressive/Intense tone - direct, bold, challenging',
+  aggressive: 'Aggressive/Intense tone - พูดตรงๆ แรงๆ ไม่อ้อมค้อม ดุดัน กระแทกใจ ท้าทาย',
+  grumpy: 'Grumpy/Fierce tone - ตัวละครต้องดุดัน หน้าโหด กล้ามโต ท่าทางข่มขู่ บ่นตลอด แต่ตลก. Visual: GRUMPY fierce intimidating characters, angry expressions, muscular poses, complaining attitude, dramatic lighting, dark vibrant colors, villainous but funny vibe, characters look tough and menacing like Pixar villains',
   scolding: 'Scolding/Nagging tone - complaining, lecturing, like a strict parent',
   troll: 'Trolling/Teasing tone - playful mockery, poking fun',
   crude: 'Crude/Raw 18+ tone - harsh, vulgar, street language',
@@ -49,6 +50,7 @@ interface BatchGenerateParams {
   sceneCount: number
   style: string
   mood: string
+  referenceStyle?: string
   topic?: string
   productName?: string
   scene?: string
@@ -58,45 +60,67 @@ function buildBatchSystemPrompt(params: BatchGenerateParams): string {
   const styleDesc = IMAGE_STYLES[params.style] || IMAGE_STYLES.pixar_3d
   const moodDesc = MOOD_DESCRIPTIONS[params.mood] || MOOD_DESCRIPTIONS.tough_love
 
-  return `คุณคือผู้เชี่ยวชาญสร้าง Image Prompt สำหรับ AI Image Generator (Google Flow)
+  // Extract English visual description from mood (e.g. "GRUMPY fierce intimidating characters...")
+  const moodVisualMatch = moodDesc.match(/Visual:\s*(.+)$/i)
+  const moodVisual = moodVisualMatch ? moodVisualMatch[1].trim() : ''
 
-สร้าง ${params.sceneCount} ภาพที่เล่าเรื่องต่อเนื่องกัน โดยมีโครงสร้าง:
-- ภาพที่ 1 (Hook): เปิดด้วยฉากดึงดูดสายตา ตัวละครแสดงอารมณ์ชัดเจน
-- ภาพที่ 2-${params.sceneCount - 1} (Story): พัฒนาเรื่อง ตัวละครเผชิญปัญหา/แก้ปัญหา
-- ภาพที่ ${params.sceneCount} (CTA): สรุป/ปิดเรื่อง
+  // For object_talk, use referenceStyle as rendering reference (object_talk is a character type, not a rendering style)
+  const renderingRef = params.style === 'object_talk' && params.referenceStyle
+    ? (IMAGE_STYLES[params.referenceStyle] || IMAGE_STYLES.pixar_3d)
+    : ''
+
+  // Full combined visual direction: rendering reference + style + mood visual
+  const imageStyle = [renderingRef, styleDesc, moodVisual].filter(Boolean).join(', ')
+  const imageStyleName = (renderingRef || styleDesc).split(',')[0].trim()
+
+  return `คุณคือผู้เชี่ยวชาญสร้าง Storyboard สำหรับวิดีโอสั้น TikTok/Reels แบบ ${params.sceneCount} ฉาก
 
 ## สไตล์ภาพ
-${styleDesc}
+${imageStyle}
 
 ## โทน/Mood
 ${moodDesc}
 
+## โครงสร้าง Storyboard (ต้องมีครบ ${params.sceneCount} ฉาก)
+- ฉากที่ 1 (Hook): เปิดด้วยคำถาม/ปัญหาที่กระแทกใจ ดึงดูดให้ดูต่อ
+- ฉากที่ 2 ถึง ${params.sceneCount - 1} (Story): เล่าเนื้อหา พัฒนาเรื่อง ตัวละครเผชิญปัญหา/แก้ปัญหา
+- ฉากที่ ${params.sceneCount} (CTA): สรุปประเด็น ชวนติดตาม/แชร์
+
 ## กฎสำคัญ
-1. ตัวละครต้องหน้าตาเหมือนกันทุกภาพ — ระบุลักษณะเดียวกันทุก prompt
-2. ทุก prompt ต้องเป็นภาษาอังกฤษ
-3. ทุก prompt ต้องระบุ: สไตล์ภาพ, ตัวละคร+อารมณ์+ท่าทาง, ฉาก/Background, มุมกล้อง
-4. ห้ามระบุ aspect ratio (ระบบตั้งค่าเอง)
-5. ต้องลงท้ายทุก prompt ด้วย "single image, no collage, no multiple panels"
+${params.style === 'object_talk' ? `1. **ตัวละครต้องเป็นสิ่งของ/อาหาร/อวัยวะที่มีชีวิต (Anthropomorphized Objects):**
+   - ห้ามใช้คนเป็นตัวละครหลัก ยกเว้นหัวข้อระบุชัดว่าต้องการคน
+   - ตัวละครต้องเป็นสิ่งของที่มี cute face, arms, legs (anthropomorphized objects)
+   - ตัวอย่าง: นมกล่องมีหน้ายิ้ม, ผักมีแขนขา, วิตามินมีตา, ไขมันเป็นตัวร้ายสีเหลือง, เชื้อโรคเป็น blob สีเขียว
+   - ถ้าหัวข้อเกี่ยวกับสุขภาพ/โภชนาการ ให้ฉากเกิดขึ้นในร่างกาย (กระเพาะ, ลำไส้, หลอดเลือด)` : `1. ตัวละครต้องหน้าตาเหมือนกันทุกภาพ — ระบุลักษณะเดียวกันทุก prompt`}
+2. ทุกฉากต้องมี Image Prompt ภาษาอังกฤษเท่านั้น ที่บอก:
+   - สไตล์ภาพ (${imageStyleName})
+   - ตัวละคร + อารมณ์ + ท่าทาง (ต้องเหมือนกันทุกฉาก)
+   - ⚠️ **ฉาก/Background ต้องต่างกันทุกฉาก!** แต่ละฉากต้องอยู่ในสถานที่/มุมมองที่ไม่ซ้ำกัน (ระบบจะใช้รูปฉากแรกเป็น reference สำหรับ character appearance + art style/tone เท่านั้น — ห้าม copy ฉากหลัง/ท่าทาง/มุมกล้อง จากฉากแรก)
+   - มุมกล้อง (ห้ามระบุ aspect ratio เพราะระบบจะตั้งค่าเอง, ห้ามใช้มุมกล้องเดิมซ้ำทุกฉาก)
+3. ทุกฉากต้องมี Video Prompt ภาษาอังกฤษที่บอก:
+   - **เฉพาะ ACTION เท่านั้น!** ระบุแค่ "ใคร ทำอะไร ที่ไหน" (เช่น "Orange walks and complains")
+   - ⚠️ **ห้ามระบุลักษณะตัวละครซ้ำ!** (ห้ามใส่ muscular, fierce, grumpy ฯลฯ เพราะภาพมีมาแล้ว)
+   - การเคลื่อนไหว (ต้องมี "subtle movement" หรือ "gentle motion")
+   - **ตัวละครพูด**: ต้องมี "speaking" หรือ "talking"
+4. ⚠️ **สำคัญมาก - ความยาวบท**: แต่ละฉากต้องมี 15-25 คำเท่านั้น! ห้ามน้อยกว่า 15 คำ และ ห้ามเกิน 25 คำ! นับคำให้ดี บทยาวเกิน = ผิดกฎ!
+   - ⚠️ **ห้ามลงท้าย ครับ/ค่ะ ทุกฉาก!** ลงท้าย "ครับ/ค่ะ" **เฉพาะฉากสุดท้าย (CTA) เท่านั้น!**
 ${params.productName ? `\n## สินค้า\nชื่อสินค้า: ${params.productName} — ต้องมีสินค้าปรากฏในทุกภาพอย่างเป็นธรรมชาติ` : ''}
 ${params.scene ? `\n## ฉาก/สถานที่\nฉากหลัก: ${params.scene}` : ''}
 
 ## ตอบกลับเป็น JSON เท่านั้น:
 {
-  "title": "ชื่อเรื่อง (สั้นกระชับ ภาษาไทย)",
+  "title": "ชื่อเรื่อง",
   "characters": [
-    {
-      "name": "ชื่อตัวละคร",
-      "appearance": "Detailed English description of character appearance, outfit, colors, features"
-    }
+    {"name": "ชื่อตัวละคร${params.style === 'object_talk' ? ' (เป็นสิ่งของ/อาหาร)' : ''}", "appearance": "${params.style === 'object_talk' ? (moodVisual ? 'anthropomorphized object matching style above - describe color, expression, pose, outfit (EN)' : 'cute anthropomorphized object with face, arms, legs - describe color, expression, outfit (EN)') : 'Detailed English description of character appearance, outfit, colors, features'}"}
   ],
   "scenes": [
     {
       "sceneNumber": 1,
       "sceneType": "hook",
-      "description": "คำอธิบายสั้นๆ ภาษาไทย",
-      "imagePrompt": "Full English image prompt...",
-      "videoPrompt": "ACTION ONLY in English: [character] + [action] + [camera movement]. No appearance description.",
-      "script": "บทพูด/บรรยาย 15-25 คำ ภาษาไทย"
+      "description": "คำอธิบายฉากสั้นๆ (TH)",
+      "imagePrompt": "${imageStyleName}. ${params.style === 'object_talk' ? (moodVisual ? '[Character name] - a [mood-matching] anthropomorphized [object] with [expression matching tone above], [pose], [color]. Background: [location]. Do NOT include aspect ratio.' : '[Character name] - a cute anthropomorphized [object] with big eyes, small arms and legs, [expression]. Background: [location]. Do NOT include aspect ratio.') : '[Full English image prompt with style, character, emotion, background, camera angle]. Do NOT include aspect ratio.'}",
+      "videoPrompt": "ACTION ONLY: [character name] + [action] + [camera]. Example: 'Orange walks forward, talking, camera follows'. NO appearance description!",
+      "script": "⚠️ 15-25 คำเท่านั้น! ตัวอย่าง: นี่คือตัวอย่างบทพูดที่มีความยาวพอดี ไม่สั้นไม่ยาวเกินไป"
     }
   ]
 }

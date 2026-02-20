@@ -679,11 +679,13 @@ const flowImageTracker = new FlowImageTracker();
 
 // TypeScript interfaces for video flow configuration
 interface VideoSetConfig {
-  image?: string;              // Base64 encoded start frame image
+  image?: string;              // Base64 encoded start frame image (legacy upload flow)
+  imageUuid?: string;          // UUID of gallery image for "Add To Prompt" flow
   prompts: string[];           // prompts[0] = initial, prompts[1..N] = extensions
   aspectRatio: '9:16' | '16:9';
   outputCount: number;         // Outputs per prompt (1-4)
   autoDownload: boolean;
+  continueFromCurrent?: boolean; // If true, skip createNewProject, use "Add To Prompt" flow
 }
 
 interface StepRetryConfig {
@@ -708,6 +710,7 @@ interface VideoFlowResult {
   error?: string;
   completedPrompts: number;    // How many prompts completed (including initial)
   downloaded: boolean;
+  videoUuids?: string[];       // UUIDs of generated videos (extracted from <video src> after generation)
 }
 
 // Default retry configuration per step
@@ -724,6 +727,11 @@ const DEFAULT_VIDEO_STEP_CONFIG: Record<string, StepRetryConfig> = {
   fillExtensionPrompt:    { maxAttempts: 2, retryDelayMs: 500,  timeoutMs: 10000 },
   waitForExtensionComplete: { maxAttempts: 1, retryDelayMs: 0,  timeoutMs: 600000 },
   downloadVideo:          { maxAttempts: 3, retryDelayMs: 3000, timeoutMs: 120000 }, // 2 min for export
+  // "Add To Prompt" flow steps
+  switchToImagesTab:       { maxAttempts: 3, retryDelayMs: 1000, timeoutMs: 15000 },
+  clickAddToPromptByUuid:  { maxAttempts: 5, retryDelayMs: 2000, timeoutMs: 30000 },
+  clickRemoveFromPrompt:   { maxAttempts: 3, retryDelayMs: 1000, timeoutMs: 15000 },
+  switchToFramesToVideo:   { maxAttempts: 3, retryDelayMs: 1000, timeoutMs: 15000 },
 };
 
 // Helper to find elements by text content
@@ -760,6 +768,13 @@ class VideoFlowController {
   private aborted: boolean = false;
   private progressCallback: ((event: VideoProgressEvent) => void) | null = null;
   private stepConfig: Record<string, StepRetryConfig>;
+
+  /**
+   * When true, video downloads are intercepted and saved to the ShopEnginX/ subfolder
+   * via chrome.downloads API instead of using the browser's default download location.
+   * Default: false (existing behavior unchanged).
+   */
+  public downloadToFolder: boolean = false;
 
   // Generation retry configuration
   private static readonly GENERATION_MAX_RETRIES = 5; // 6 total attempts
@@ -1320,6 +1335,758 @@ class VideoFlowController {
     console.log('[VideoFlowController] Image upload complete');
   }
 
+  // ─── "Add To Prompt" flow methods ──────────────────────
+
+  /**
+   * Step: Switch to Images tab in the gallery
+   */
+  async switchToImagesTab(): Promise<void> {
+    const config = this.stepConfig['switchToImagesTab'];
+
+    // Check if already on Images tab (aria-checked="true")
+    const alreadyActive = document.querySelector('button[role="radio"][aria-checked="true"]');
+    if (alreadyActive?.textContent?.includes('Images')) {
+      console.log('[VideoFlowController] Images tab already active, skipping');
+      return;
+    }
+
+    // Wait for Images radio to appear in the DOM
+    await this.waitFor(
+      () => findByText('[role="radio"]', 'Images') !== null,
+      'Images tab radio visible',
+      config.timeoutMs
+    );
+
+    const imagesRadio = findByText('[role="radio"]', 'Images');
+    if (!imagesRadio) throw new Error('Images tab radio not found');
+    imagesRadio.click();
+
+    // Wait for the tab to become active
+    await this.waitFor(
+      () => {
+        const active = document.querySelector('button[role="radio"][aria-checked="true"]');
+        return active?.textContent?.includes('Images') ?? false;
+      },
+      'Images tab active',
+      config.timeoutMs
+    );
+    await this.delay(500);
+    console.log('[VideoFlowController] Switched to Images tab');
+  }
+
+  /**
+   * Step: Find gallery image by UUID and click "Add To Prompt"
+   */
+  async clickAddToPromptByUuid(uuid: string): Promise<void> {
+    const config = this.stepConfig['clickAddToPromptByUuid'];
+
+    // Wait for the image to appear in the gallery
+    await this.waitFor(
+      () => document.querySelector(`img[src*="${uuid}"]`) !== null,
+      `gallery image ${uuid.substring(0, 8)} visible`,
+      config.timeoutMs
+    );
+
+    const img = document.querySelector(`img[src*="${uuid}"]`) as HTMLElement | null;
+    if (!img) throw new Error(`Gallery image not found for UUID: ${uuid}`);
+
+    // Hover over the image container to reveal overlay buttons.
+    // The "Add To Prompt" button is lazy-loaded on hover, so we hover multiple
+    // ancestor levels and then waitFor the button rather than using a fixed delay.
+    const hoverTargets: HTMLElement[] = [];
+    let el: HTMLElement | null = img;
+    for (let i = 0; i < 5 && el; i++) {
+      el = el.parentElement;
+      if (el) hoverTargets.push(el);
+    }
+    // Dispatch hover events on all ancestor containers (one of them is the hover target)
+    for (const target of hoverTargets) {
+      target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    }
+
+    // Wait for "Add To Prompt" button to appear near this image (instead of fixed 500ms)
+    let addBtn: HTMLButtonElement | null = null;
+    await this.waitFor(
+      () => {
+        let searchRoot: Element | null = img;
+        for (let i = 0; i < 8 && searchRoot; i++) {
+          searchRoot = searchRoot.parentElement;
+          if (searchRoot) {
+            const buttons = searchRoot.querySelectorAll('button');
+            for (const btn of buttons) {
+              if (btn.textContent?.includes('Add To Prompt')) {
+                addBtn = btn as HTMLButtonElement;
+                return true;
+              }
+            }
+          }
+        }
+        return false;
+      },
+      `Add To Prompt button for ${uuid.substring(0, 8)}`,
+      10000
+    );
+
+    if (!addBtn) throw new Error(`"Add To Prompt" button not found for UUID: ${uuid}`);
+    addBtn.click();
+
+    // Wait for the button to change to "Remove From Prompt" (confirms ingredient was added)
+    await this.waitFor(
+      () => findButtonByText('Remove From Prompt') !== null,
+      'ingredient added (Remove From Prompt visible)',
+      config.timeoutMs
+    );
+    await this.delay(500);
+    console.log(`[VideoFlowController] Added image ${uuid.substring(0, 8)} to prompt`);
+  }
+
+  /**
+   * Step: Remove current ingredient from prompt
+   */
+  async clickRemoveFromPrompt(): Promise<void> {
+    const config = this.stepConfig['clickRemoveFromPrompt'];
+
+    // Wait for "Remove From Prompt" button to appear
+    await this.waitFor(
+      () => findButtonByText('Remove From Prompt') !== null,
+      'Remove From Prompt button visible',
+      config.timeoutMs
+    );
+
+    const removeBtn = findButtonByText('Remove From Prompt');
+    if (!removeBtn) throw new Error('"Remove From Prompt" button not found');
+    removeBtn.click();
+
+    // Wait for the button to revert to "Add To Prompt" (confirms removal)
+    await this.waitFor(
+      () => findButtonByText('Remove From Prompt') === null,
+      'ingredient removed',
+      config.timeoutMs
+    );
+    await this.delay(500);
+    console.log('[VideoFlowController] Removed image from prompt');
+  }
+
+  /**
+   * Step: Switch the mode dropdown to "Frames to Video"
+   */
+  async switchToFramesToVideo(): Promise<void> {
+    const config = this.stepConfig['switchToFramesToVideo'];
+
+    // Check if already on "Frames to Video"
+    const modeDropdown = document.querySelector('[role="combobox"]');
+    if (modeDropdown?.textContent?.includes('Frames to Video')) {
+      console.log('[VideoFlowController] Already in Frames to Video mode');
+      return;
+    }
+
+    // Click the mode combobox to open dropdown
+    const combobox = findByText('[role="combobox"]', 'arrow_drop_down');
+    if (!combobox) throw new Error('Mode dropdown combobox not found');
+    combobox.click();
+
+    // Wait for listbox with options to appear
+    await this.waitFor(
+      () => findByText('[role="option"]', 'Frames to Video') !== null,
+      'Frames to Video option visible',
+      config.timeoutMs
+    );
+    await this.delay(200);
+
+    // Click "Frames to Video" option
+    const option = findByText('[role="option"]', 'Frames to Video');
+    if (!option) throw new Error('"Frames to Video" option not found in dropdown');
+    option.click();
+
+    // Wait for mode to change
+    await this.waitFor(
+      () => {
+        const current = document.querySelector('[role="combobox"]');
+        return current?.textContent?.includes('Frames to Video') ?? false;
+      },
+      'mode change to Frames to Video',
+      config.timeoutMs
+    );
+    await this.delay(500);
+    console.log('[VideoFlowController] Switched to Frames to Video mode');
+  }
+
+  /**
+   * Switch to Videos tab in the gallery (the radio with "Videos" text)
+   */
+  async switchToVideosTab(): Promise<void> {
+    // Check if already on Videos tab
+    const alreadyActive = document.querySelector('button[role="radio"][aria-checked="true"]');
+    if (alreadyActive?.textContent?.includes('Videos')) {
+      console.log('[VideoFlowController] Videos tab already active');
+      return;
+    }
+
+    const videosRadio = findByText('[role="radio"]', 'Videos');
+    if (!videosRadio) throw new Error('Videos tab radio not found');
+    videosRadio.click();
+
+    await this.waitFor(
+      () => {
+        const active = document.querySelector('button[role="radio"][aria-checked="true"]');
+        return active?.textContent?.includes('Videos') ?? false;
+      },
+      'Videos tab active',
+      10000
+    );
+    await this.delay(500);
+    console.log('[VideoFlowController] Switched to Videos tab');
+  }
+
+  /**
+   * Find the gallery scroll container by structural properties.
+   * The gallery uses a virtualized list inside a div with overflow:auto
+   * that contains <video> elements. We detect it structurally to avoid
+   * relying on styled-components class hashes that may change between builds.
+   */
+  private findGalleryScrollContainer(): HTMLElement | null {
+    const allDivs = document.querySelectorAll('div');
+    for (const el of allDivs) {
+      const style = getComputedStyle(el);
+      const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                            style.overflowY === 'auto' || style.overflowY === 'scroll';
+      if (isScrollable && el.scrollHeight > el.clientHeight + 100 && (el as HTMLElement).clientHeight > 200) {
+        if (el.querySelectorAll('video').length > 0) {
+          return el as HTMLElement;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Scroll the gallery incrementally to find a specific video UUID.
+   * The gallery is virtualized — only 2-3 <video> elements exist in DOM at a time.
+   * We scroll step-by-step (70% of viewport per step) and check at each position.
+   * Returns the found <video> element or null.
+   */
+  private async scrollToFindVideoByUuid(videoUuid: string): Promise<HTMLElement | null> {
+    const container = this.findGalleryScrollContainer();
+    if (!container) {
+      console.warn('[VideoFlowController] Gallery scroll container not found');
+      return null;
+    }
+
+    const clientHeight = container.clientHeight;
+    const stepSize = Math.floor(clientHeight * 0.7);
+    const maxSteps = Math.ceil(container.scrollHeight / stepSize) + 2;
+
+    // Start from top
+    container.scrollTop = 0;
+    await this.delay(300);
+
+    for (let step = 0; step < maxSteps; step++) {
+      const videoEl = document.querySelector(`video[src*="${videoUuid}"]`) as HTMLElement | null;
+      if (videoEl) {
+        console.log(`[VideoFlowController] Found video UUID ${videoUuid.substring(0, 8)}... at scroll step ${step} (scrollTop: ${Math.round(container.scrollTop)})`);
+        return videoEl;
+      }
+
+      // Not found at this position — scroll down
+      container.scrollTop += stepSize;
+      await this.delay(500);
+
+      // Check if we've reached the bottom
+      if (container.scrollTop + container.clientHeight >= container.scrollHeight - 10) {
+        // One final check at bottom position
+        const lastCheck = document.querySelector(`video[src*="${videoUuid}"]`) as HTMLElement | null;
+        if (lastCheck) {
+          console.log(`[VideoFlowController] Found video UUID ${videoUuid.substring(0, 8)}... at bottom`);
+          return lastCheck;
+        }
+        break;
+      }
+    }
+
+    console.log(`[VideoFlowController] Video UUID ${videoUuid.substring(0, 8)}... not found after scrolling entire gallery`);
+    return null;
+  }
+
+  /**
+   * Search the DOM for a video clip matching the prompt snippet.
+   * Returns the found prompt element or null.
+   */
+  private findVideoPromptElement(promptSnippet: string): HTMLElement | null {
+    const allElements = document.querySelectorAll('button, div, span, p');
+    for (const el of allElements) {
+      const t = (el.textContent || '').trim();
+      if (t.length > 40 && t.length < 600 && t.includes(promptSnippet)) {
+        return el as HTMLElement;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Find a video clip in the gallery by its UUID, then click "Add to scene".
+   * The gallery is virtualized — only 2-3 videos exist in DOM at a time —
+   * so we incrementally scroll to find the target video element.
+   * Returns: 'redirected' | 'added' | 'already' | 'not_found'
+   */
+  async addVideoToSceneByUuid(videoUuid: string): Promise<'redirected' | 'added' | 'already' | 'not_found' | 'needs_resize'> {
+    console.log(`[VideoFlowController] Looking for video with UUID: ${videoUuid.substring(0, 8)}...`);
+
+    // At <768px, scene buttons are hidden via CSS media query
+    if (window.innerWidth < 768) {
+      console.log(`[VideoFlowController] Viewport too narrow (${window.innerWidth}px), requesting resize.`);
+      return 'needs_resize';
+    }
+
+    // Incrementally scroll the virtualized gallery to find the video
+    const videoEl = await this.scrollToFindVideoByUuid(videoUuid);
+
+    if (!videoEl) {
+      console.log(`[VideoFlowController] Video element not found for UUID: ${videoUuid}`);
+      return 'not_found';
+    }
+
+    // Find "Add to scene" / "Remove from scene" button near this video
+    let addBtn: HTMLButtonElement | null = null;
+    let alreadyAdded = false;
+
+    let searchRoot: Element | null = videoEl;
+    for (let depth = 0; depth < 15 && searchRoot; depth++) {
+      searchRoot = searchRoot.parentElement;
+      if (searchRoot) {
+        const btns = searchRoot.querySelectorAll('button');
+        for (const btn of btns) {
+          const btnText = btn.textContent || '';
+          if (btnText.includes('Remove from scene')) {
+            alreadyAdded = true;
+            break;
+          }
+          if (btnText.includes('Add to scene')) {
+            if (!addBtn || btn.classList.contains('sc-19ee82ba-2')) {
+              addBtn = btn as HTMLButtonElement;
+            }
+          }
+        }
+        if (alreadyAdded || addBtn) break;
+      }
+    }
+
+    if (alreadyAdded) {
+      console.log('[VideoFlowController] Video already in scene, skipping');
+      return 'already';
+    }
+
+    if (!addBtn) {
+      console.warn(`[VideoFlowController] Found video element but no "Add to scene" button`);
+      return 'not_found';
+    }
+
+    // Use CSS override + synthetic events (validated via Playwright)
+    this.simulateRealClick(addBtn);
+    console.log('[VideoFlowController] Clicked "Add to scene" for video', videoUuid.substring(0, 8));
+
+    // Wait to see if page redirects to scenebuilder (first add) or stays (subsequent adds)
+    await this.delay(2000);
+
+    if (window.location.href.includes('/scenes/')) {
+      await this.delay(1000);
+      console.log('[VideoFlowController] Redirected to scenebuilder');
+      return 'redirected';
+    } else {
+      // Subsequent add — stayed on project page
+      await this.delay(1000);
+      console.log('[VideoFlowController] Added to scene (stayed on project page)');
+      return 'added';
+    }
+  }
+
+  /**
+   * Navigate back from scenebuilder to the project page (for adding more clips).
+   * Uses breadcrumb click: Flow > [Project Name] > Scenebuilder
+   * We click the project name button (middle breadcrumb item).
+   */
+  async navigateBackToProject(): Promise<void> {
+    if (!window.location.href.includes('/scenes/')) {
+      console.log('[VideoFlowController] Already on project page');
+      return;
+    }
+
+    // Find breadcrumb list and click the project name button (not "Flow", not "Scenebuilder")
+    const breadcrumbButtons = Array.from(document.querySelectorAll('li button, [role="listitem"] button'));
+    let projectBtn: HTMLButtonElement | null = null;
+    for (const btn of breadcrumbButtons) {
+      const text = (btn.textContent || '').trim();
+      // Project name button contains a date pattern or is between Flow and Scenebuilder
+      if (text && !text.includes('Scenebuilder') && !text.includes('Flow') && !text.includes('Edit project') && !text.includes('Delete')) {
+        projectBtn = btn as HTMLButtonElement;
+        break;
+      }
+    }
+
+    if (!projectBtn) {
+      // Fallback: use URL manipulation
+      console.log('[VideoFlowController] Breadcrumb not found, falling back to URL navigation');
+      const projectUrl = window.location.href.replace(/\/scenes\/.*$/, '');
+      window.location.href = projectUrl;
+    } else {
+      console.log(`[VideoFlowController] Clicking breadcrumb: "${projectBtn.textContent?.trim()}"`);
+      projectBtn.click();
+    }
+
+    // Wait for project page to load (URL no longer has /scenes/)
+    await this.waitFor(
+      () => !window.location.href.includes('/scenes/'),
+      'project page loaded',
+      15000
+    );
+    await this.delay(2000);
+    console.log('[VideoFlowController] Back on project page');
+  }
+
+  /**
+   * Simulate a real click on a button using CSS override + full synthetic pointer/mouse events.
+   * This is needed because Flow's video cards use CSS :hover to show/hide overlay buttons,
+   * and parent divs have pointer-events: none. A simple element.click() won't trigger
+   * React's business logic properly.
+   *
+   * Approach (validated via Playwright simulation):
+   * 1. Force button visible via inline style overrides
+   * 2. Fix pointer-events: none on ancestor divs
+   * 3. Dispatch full pointer → mouse event sequence with real coordinates
+   */
+  private simulateRealClick(button: HTMLButtonElement): void {
+    // Step 1: Force button visible
+    button.style.cssText = 'display: flex !important; opacity: 1 !important; visibility: visible !important; pointer-events: auto !important; filter: none !important; transform: none !important;';
+
+    // Step 2: Fix parent chain — remove pointer-events: none from ancestors
+    let el: HTMLElement | null = button.parentElement;
+    for (let i = 0; i < 5 && el; i++) {
+      const style = window.getComputedStyle(el);
+      if (style.pointerEvents === 'none') {
+        el.style.pointerEvents = 'auto';
+      }
+      el = el.parentElement;
+    }
+
+    // Step 3: Get button coordinates
+    const rect = button.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+
+    const eventInit: PointerEventInit & MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      screenX: x,
+      screenY: y,
+      view: window,
+      button: 0,
+      buttons: 1,
+    };
+
+    // Step 4: Dispatch hover sequence (triggers React's onPointerDown etc.)
+    button.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerId: 1 }));
+    button.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerId: 1, bubbles: false }));
+    button.dispatchEvent(new MouseEvent('mouseover', eventInit));
+    button.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
+
+    // Step 5: Dispatch click sequence
+    button.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerId: 1 }));
+    button.dispatchEvent(new MouseEvent('mousedown', eventInit));
+    button.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerId: 1, buttons: 0 }));
+    button.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
+    button.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
+  }
+
+  /**
+   * Lightweight version: find video by UUID, click "Add to scene" using synthetic events.
+   * Returns: { status: 'clicked' | 'already' | 'not_found' | 'needs_resize' }
+   *
+   * If viewport < 768px, scene buttons are hidden via CSS media query and cannot be
+   * made functional. Returns 'needs_resize' so the sidebar can widen the window.
+   */
+  async clickAddToSceneByUuid(videoUuid: string): Promise<{ status: 'clicked' | 'already' | 'not_found' | 'needs_resize' }> {
+    console.log(`[VideoFlowController] clickAddToSceneByUuid: looking for ${videoUuid.substring(0, 8)}...`);
+
+    // Check if viewport is wide enough for scene buttons to work.
+    // At <768px, @media (max-width: 768px) sets display:none on scene buttons
+    // AND hides the "Scenebuilder" breadcrumb. Sidebar must resize window first.
+    if (window.innerWidth < 768) {
+      console.log(`[VideoFlowController] Viewport too narrow (${window.innerWidth}px < 768px), scene buttons hidden. Requesting resize.`);
+      return { status: 'needs_resize' };
+    }
+
+    // Incrementally scroll to find the video
+    const videoEl = await this.scrollToFindVideoByUuid(videoUuid);
+    if (!videoEl) {
+      console.log(`[VideoFlowController] Video not found: ${videoUuid.substring(0, 8)}...`);
+      return { status: 'not_found' };
+    }
+
+    // Find "Add to scene" / "Remove from scene" button near this video.
+    // Walk up the DOM from the video element to find the card container, then search buttons.
+    let addBtn: HTMLButtonElement | null = null;
+    let alreadyAdded = false;
+
+    // Search upward from video element to find the card and its buttons
+    let searchRoot: Element | null = videoEl;
+    for (let depth = 0; depth < 15 && searchRoot; depth++) {
+      searchRoot = searchRoot.parentElement;
+      if (searchRoot) {
+        const btns = searchRoot.querySelectorAll('button');
+        for (const btn of btns) {
+          const btnText = btn.textContent || '';
+          if (btnText.includes('Remove from scene')) {
+            alreadyAdded = true;
+            break;
+          }
+          if (btnText.includes('Add to scene')) {
+            // Prefer the Type-2 (round) button — it becomes visible at >768px viewport.
+            // Type-1 (pill) stays display:none even at 1024px.
+            if (!addBtn || btn.classList.contains('sc-19ee82ba-2')) {
+              addBtn = btn as HTMLButtonElement;
+            }
+          }
+        }
+        if (alreadyAdded || addBtn) break;
+      }
+    }
+
+    if (alreadyAdded) {
+      console.log(`[VideoFlowController] Video ${videoUuid.substring(0, 8)}... already in scene`);
+      return { status: 'already' };
+    }
+
+    if (!addBtn) {
+      console.warn(`[VideoFlowController] Found video but no "Add to scene" button for ${videoUuid.substring(0, 8)}...`);
+      return { status: 'not_found' };
+    }
+
+    // Use CSS override + synthetic events to click the button
+    this.simulateRealClick(addBtn);
+    console.log(`[VideoFlowController] Clicked "Add to scene" for ${videoUuid.substring(0, 8)}... via synthetic events`);
+
+    // Brief wait then verify the button changed to "Remove from scene"
+    await this.delay(2000);
+    const btnTextAfter = addBtn.textContent || '';
+    if (btnTextAfter.includes('Remove from scene')) {
+      console.log(`[VideoFlowController] Confirmed: button changed to "Remove from scene"`);
+    } else {
+      console.warn(`[VideoFlowController] Button text after click: "${btnTextAfter}" — may not have registered`);
+    }
+
+    return { status: 'clicked' };
+  }
+
+  /**
+   * Navigate TO scenebuilder from the project page.
+   * Looks for "Scenebuilder" button/link in breadcrumb or page, then waits for URL.
+   * If already on scenebuilder, returns immediately.
+   * Throws 'NEEDS_RESIZE' if viewport <768px (breadcrumb hidden by media query).
+   */
+  async navigateToScenebuilder(): Promise<void> {
+    if (window.location.href.includes('/scenes/')) {
+      console.log('[VideoFlowController] Already on scenebuilder page');
+      return;
+    }
+
+    // At <768px, "Scenebuilder" breadcrumb is hidden by CSS media query
+    if (window.innerWidth < 768) {
+      throw new Error('NEEDS_RESIZE');
+    }
+
+    // Look for "Scenebuilder" text in buttons or links on the page
+    const allClickables = Array.from(document.querySelectorAll('button, a, [role="tab"], [role="link"], li button, [role="listitem"] button'));
+    let scenebuilderEl: HTMLElement | null = null;
+    for (const el of allClickables) {
+      const text = (el.textContent || '').trim();
+      if (text === 'Scenebuilder' || text === 'Scene builder') {
+        scenebuilderEl = el as HTMLElement;
+        break;
+      }
+    }
+
+    if (scenebuilderEl) {
+      console.log(`[VideoFlowController] Clicking Scenebuilder element: "${scenebuilderEl.textContent?.trim()}"`);
+      scenebuilderEl.click();
+    } else {
+      // Fallback: look for any link/anchor with href containing /scenes/
+      const sceneLink = document.querySelector('a[href*="/scenes/"]') as HTMLAnchorElement | null;
+      if (sceneLink) {
+        console.log(`[VideoFlowController] Clicking scene link: ${sceneLink.href}`);
+        sceneLink.click();
+      } else {
+        throw new Error('Cannot find Scenebuilder navigation element on project page');
+      }
+    }
+
+    // Wait for URL to contain /scenes/
+    await this.waitFor(
+      () => window.location.href.includes('/scenes/'),
+      'navigate to scenebuilder',
+      15000
+    );
+    await this.delay(2000); // Wait for scenebuilder to fully load
+    console.log('[VideoFlowController] Navigated to scenebuilder');
+  }
+
+  /**
+   * Navigate to scenebuilder and download the scene video.
+   * Used after all videos have been added to scene.
+   * Returns { success, needsResize, error } so sidebar can resize window if needed.
+   *
+   * Flow:
+   *  1. Navigate to scenebuilder (click breadcrumb)
+   *  2. Click toolbar "Download" button → triggers video export
+   *  3. Wait for "Video exported!" notification toast
+   *  4. Click the <a>Download</a> link inside the notification → actual file download
+   */
+  async navigateAndDownloadSceneVideo(): Promise<{ success: boolean; needsResize?: boolean; error?: string }> {
+    try {
+      // Step 1: Ensure we're on the scenebuilder page
+      await this.navigateToScenebuilder();
+
+      // Step 2: Wait for scenebuilder to fully load (download button to appear)
+      await this.delay(3000);
+
+      // Step 3: Find and click the toolbar Download button (triggers export)
+      const downloadBtn = Array.from(document.querySelectorAll('button')).find(
+        btn => btn.textContent?.includes('Download') && !btn.textContent?.includes('Flip')
+      ) as HTMLButtonElement | undefined;
+
+      if (!downloadBtn) {
+        console.warn('[VideoFlowController] Download button not found in scenebuilder');
+        return { success: false, error: 'Download button not found in scenebuilder' };
+      }
+
+      console.log('[VideoFlowController] Clicking Download button in scenebuilder (triggers export)');
+      downloadBtn.click();
+
+      // Step 4: Wait for "Video exported!" notification toast (can take up to 2 min)
+      const exportTimeout = this.stepConfig['downloadVideo']?.timeoutMs ?? 120000;
+      console.log(`[VideoFlowController] Waiting for "Video exported!" notification (timeout: ${exportTimeout}ms)`);
+      await this.waitFor(
+        () => findByText('[data-sonner-toast]', 'Video exported') !== null,
+        'Video exported notification',
+        exportTimeout
+      );
+      console.log('[VideoFlowController] Export complete, notification appeared');
+
+      // Step 5: Download the video from the notification
+      const notification = findByText('[data-sonner-toast]', 'Video exported');
+      if (notification) {
+        const downloadLink = notification.querySelector('a') as HTMLAnchorElement | null;
+        if (downloadLink) {
+          if (this.downloadToFolder) {
+            // Intercept onclick to capture data URI and save to ShopEnginX/ folder
+            console.log('[VideoFlowController] Intercepting download for ShopEnginX/ folder');
+            const intercepted = await this.interceptDownloadToFolder(downloadLink);
+            if (!intercepted) {
+              console.log('[VideoFlowController] Intercept failed, falling back to direct click');
+              downloadLink.click();
+            }
+          } else {
+            // Default: just click (downloads to browser default location)
+            console.log('[VideoFlowController] Clicking Download link in export notification');
+            downloadLink.click();
+          }
+          await this.delay(3000);
+        } else {
+          console.warn('[VideoFlowController] No download link found in export notification');
+        }
+
+        // Dismiss the notification
+        const dismissBtn = notification.querySelector('button');
+        if (dismissBtn) {
+          dismissBtn.click();
+          console.log('[VideoFlowController] Dismissed export notification');
+        }
+      }
+
+      return { success: true };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (errorMsg === 'NEEDS_RESIZE') {
+        console.log('[VideoFlowController] Viewport too narrow for scenebuilder navigation');
+        return { success: false, needsResize: true };
+      }
+      console.error('[VideoFlowController] Navigate and download scene video failed:', errorMsg);
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
+   * Add all generated videos to scenebuilder in scene order.
+   * Matches each video by its UUID (from <video src>) and clicks "Add to scene".
+   * Returns notFoundUuids so the sidebar can refresh the page and retry.
+   */
+  async addAllVideosToSceneInOrder(videoUuidsInOrder: string[]): Promise<{ success: boolean; addedCount: number; skipped: number; notFoundUuids: string[]; error?: string }> {
+    let addedCount = 0;
+    let skipped = 0;
+    const notFoundUuids: string[] = [];
+
+    try {
+      // Switch to Videos tab to see generated videos
+      await this.switchToVideosTab();
+
+      for (let i = 0; i < videoUuidsInOrder.length; i++) {
+        const uuid = videoUuidsInOrder[i];
+
+        console.log(`[VideoFlowController] Adding video ${i + 1}/${videoUuidsInOrder.length} to scene (UUID: ${uuid.substring(0, 8)}...)`);
+
+        this.reportProgress({
+          step: 'addVideoToSceneByUuid',
+          attempt: 1,
+          maxAttempts: 1,
+          status: 'running',
+          promptIndex: i,
+          totalPrompts: videoUuidsInOrder.length,
+        });
+
+        try {
+          const result = await this.addVideoToSceneByUuid(uuid);
+
+          if (result === 'not_found') {
+            console.warn(`[VideoFlowController] Video ${i + 1} not found in DOM (UUID: ${uuid.substring(0, 8)}...)`);
+            notFoundUuids.push(uuid);
+            skipped++;
+          } else if (result === 'already') {
+            console.log(`[VideoFlowController] Video ${i + 1} already in scene`);
+            addedCount++;
+          } else {
+            addedCount++;
+
+            // Navigate back if we were redirected to scenebuilder (first add)
+            if (result === 'redirected' && i < videoUuidsInOrder.length - 1) {
+              await this.navigateBackToProject();
+              // After navigating back, switch to videos tab (addVideoToSceneByUuid handles its own scrolling)
+              await this.switchToVideosTab();
+            }
+            // If 'added' (stayed on project page), no navigation needed
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[VideoFlowController] Error adding video ${i + 1}: ${msg}`);
+          notFoundUuids.push(uuid);
+          skipped++;
+          // If we ended up in scenebuilder, navigate back
+          if (window.location.href.includes('/scenes/') && i < videoUuidsInOrder.length - 1) {
+            await this.navigateBackToProject();
+            await this.switchToVideosTab();
+          }
+        }
+      }
+
+      console.log(`[VideoFlowController] Done: ${addedCount} added, ${skipped} skipped, ${notFoundUuids.length} not found out of ${videoUuidsInOrder.length}`);
+      return { success: addedCount > 0, addedCount, skipped, notFoundUuids };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[VideoFlowController] Add videos to scene failed after ${addedCount}/${videoUuidsInOrder.length}:`, errorMsg);
+      return { success: false, addedCount, skipped, notFoundUuids, error: errorMsg };
+    }
+  }
+
   /**
    * Step: Fill the video prompt
    */
@@ -1373,6 +2140,27 @@ class VideoFlowController {
       'generation started (percentage)',
       config.timeoutMs
     );
+  }
+
+  /**
+   * Capture video UUIDs from <video> elements currently in the DOM.
+   * Video src pattern: https://storage.googleapis.com/ai-sandbox-videofx/video/{UUID}?...
+   */
+  captureVideoUuids(): string[] {
+    const videos = document.querySelectorAll('video[src]');
+    const uuids: string[] = [];
+    const uuidRegex = /video\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+
+    for (const v of videos) {
+      const src = v.getAttribute('src') || '';
+      const match = src.match(uuidRegex);
+      if (match) {
+        uuids.push(match[1]);
+      }
+    }
+
+    console.log(`[VideoFlowController] Captured ${uuids.length} video UUID(s):`, uuids);
+    return uuids;
   }
 
   /**
@@ -1582,6 +2370,38 @@ class VideoFlowController {
   }
 
   /**
+   * Intercept the notification's Download <a> onclick handler to capture
+   * the data: URI and original filename, then re-download via chrome.downloads
+   * to the ShopEnginX/ subfolder.
+   *
+   * Delegates to the background script which uses chrome.scripting.executeScript
+   * with world: 'MAIN' to access React props (bypasses CSP and content script isolation).
+   *
+   * Returns true if the download was intercepted, false if fallback is needed.
+   */
+  private async interceptDownloadToFolder(_downloadLink: HTMLAnchorElement): Promise<boolean> {
+    try {
+      const response = await new Promise<{ success: boolean; error?: string; filename?: string }>((resolve) => {
+        chrome.runtime.sendMessage({
+          action: 'interceptVideoDownload',
+          tabId: null, // background will use sender.tab.id
+        }, resolve);
+      });
+
+      if (response?.success) {
+        console.log(`[VideoFlowController] Video download intercepted: ${response.filename}`);
+        return true;
+      } else {
+        console.warn('[VideoFlowController] Intercept failed:', response?.error);
+        return false;
+      }
+    } catch (error) {
+      console.error('[VideoFlowController] Intercept message error:', error);
+      return false;
+    }
+  }
+
+  /**
    * Step: Download the video
    */
   async downloadVideo(): Promise<void> {
@@ -1602,38 +2422,56 @@ class VideoFlowController {
     );
     console.log('[VideoFlowController] Export complete');
 
-    // Extract URL from the Download link and use chrome.downloads API
+    // Find the Download link inside the notification
     const notification = findByText('[data-sonner-toast]', 'Video exported');
     if (notification) {
-      const downloadLink = notification.querySelector('a') as HTMLAnchorElement;
-      if (downloadLink && downloadLink.href) {
-        // Generate timestamped filename
-        const now = new Date();
-        const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const filename = `video_${timestamp}.mp4`;
-        
-        // Use background script to download to ShopEnginX folder
-        try {
-          const response = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-            chrome.runtime.sendMessage({
-              action: 'downloadImage',
-              url: downloadLink.href,
-              filename: filename,
-              subfolder: 'ShopEnginX'
-            }, resolve);
-          });
-          
-          if (response?.success) {
-            console.log(`[VideoFlowController] Video download started: ShopEnginX/${filename}`);
-          } else {
-            console.error('[VideoFlowController] Download failed:', response?.error);
-            // Fallback to clicking the link
+      const downloadLink = notification.querySelector('a') as HTMLAnchorElement | null;
+      if (downloadLink) {
+        const hasRealHref = downloadLink.href && downloadLink.href !== window.location.href && !downloadLink.href.endsWith('#');
+
+        if (hasRealHref) {
+          // Has a real href — use chrome.downloads API directly
+          const now = new Date();
+          const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const filename = `video_${timestamp}.mp4`;
+
+          try {
+            const response = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+              chrome.runtime.sendMessage({
+                action: 'downloadImage',
+                url: downloadLink.href,
+                filename: filename,
+                subfolder: 'ShopEnginX'
+              }, resolve);
+            });
+
+            if (response?.success) {
+              console.log(`[VideoFlowController] Video download started: ShopEnginX/${filename}`);
+            } else {
+              console.error('[VideoFlowController] Download API failed:', response?.error);
+              downloadLink.click();
+            }
+          } catch (error) {
+            console.error('[VideoFlowController] Download API error, falling back to click:', error);
             downloadLink.click();
           }
-        } catch (error) {
-          console.error('[VideoFlowController] Download API error, falling back to click:', error);
+        } else if (this.downloadToFolder) {
+          // No href + downloadToFolder flag — intercept onclick to capture data URI
+          // and re-download to ShopEnginX/ folder via chrome.downloads
+          console.log('[VideoFlowController] Intercepting download for ShopEnginX/ folder');
+          const intercepted = await this.interceptDownloadToFolder(downloadLink);
+          if (!intercepted) {
+            console.log('[VideoFlowController] Intercept failed, falling back to direct click');
+            downloadLink.click();
+          }
+        } else {
+          // No href, no flag — just click (downloads to browser default location)
+          console.log('[VideoFlowController] Clicking Download link in notification (onclick handler)');
           downloadLink.click();
         }
+        await this.delay(3000); // Wait for download to start
+      } else {
+        console.warn('[VideoFlowController] No download link found in export notification');
       }
 
       // Dismiss the notification
@@ -1720,28 +2558,59 @@ class VideoFlowController {
   async executeSet(config: VideoSetConfig): Promise<VideoFlowResult> {
     let completedPrompts = 0;
     let downloaded = false;
+    const videoUuids: string[] = [];
 
     try {
-// Phase 0: Create new project
-      await this.executeStep('createNewProject', () => this.createNewProject());
+      if (config.continueFromCurrent && config.imageUuid) {
+        // ─── "Add To Prompt" flow: stay in same project, use gallery image ───
+        // Remove any existing ingredient first (handles Extension OFF job 2+)
+        try {
+          await this.clickRemoveFromPrompt();
+          await this.delay(500);
+        } catch { /* ignore if nothing to remove — first job */ }
 
-// Phase 1: Setup
-      await this.executeStep('ensureVideoMode', () => this.ensureVideoMode());
-      await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio, config.outputCount));
+        await this.executeStep('switchToImagesTab', () => this.switchToImagesTab());
+        await this.executeStep('clickAddToPromptByUuid', () => this.clickAddToPromptByUuid(config.imageUuid!));
+        await this.executeStep('switchToFramesToVideo', () => this.switchToFramesToVideo());
+        await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio, config.outputCount));
+      } else {
+        // ─── Legacy flow: create new project + upload image ───
+        await this.executeStep('createNewProject', () => this.createNewProject());
+        await this.executeStep('ensureVideoMode', () => this.ensureVideoMode());
+        await this.executeStep('configureSettings', () => this.configureSettings(config.aspectRatio, config.outputCount));
+      }
 
-      // Phase 2-3: Upload and Initial generation (with retry)
+      // Phase 2-3: Upload (legacy) and Initial generation (with retry)
       let initialGenAttempt = 0;
       while (initialGenAttempt <= VideoFlowController.GENERATION_MAX_RETRIES) {
         try {
-          // Phase 2: Upload image if provided
-          if (config.image) {
+          // Phase 2: Upload image if provided (legacy flow only)
+          if (!config.continueFromCurrent && config.image) {
             await this.executeStep('uploadImage', () => this.uploadImage(config.image!, config.aspectRatio));
           }
 
           // Phase 3: Initial generation
+          // Snapshot existing video UUIDs before generation (to diff afterwards)
+          const videoUuidsBefore = new Set(this.captureVideoUuids());
+
           await this.executeStep('fillPrompt', () => this.fillPrompt(config.prompts[0]), 0, config.prompts.length);
           await this.executeStep('clickCreate', () => this.clickCreate(), 0, config.prompts.length);
           await this.executeStep('waitForInitialComplete', () => this.waitForInitialCompletion(), 0, config.prompts.length);
+
+          // Capture newly generated video UUID(s) by diffing with snapshot
+          const videoUuidsAfter = this.captureVideoUuids();
+          const newVideoUuids = videoUuidsAfter.filter(u => !videoUuidsBefore.has(u));
+          if (newVideoUuids.length > 0) {
+            videoUuids.push(...newVideoUuids);
+            console.log(`[VideoFlowController] New video UUID(s):`, newVideoUuids);
+          } else {
+            // Fallback: if no new UUIDs found (e.g., DOM didn't update yet), take the last one
+            if (videoUuidsAfter.length > 0) {
+              videoUuids.push(videoUuidsAfter[videoUuidsAfter.length - 1]);
+              console.log(`[VideoFlowController] Fallback: using last video UUID:`, videoUuidsAfter[videoUuidsAfter.length - 1]);
+            }
+          }
+
           completedPrompts = 1;
           break; // Success - exit retry loop
         } catch (error) {
@@ -1755,18 +2624,33 @@ class VideoFlowController {
           this.reportGenerationRetry('initial', initialGenAttempt, VideoFlowController.GENERATION_MAX_RETRIES + 1, errorMsg);
           console.log(`[VideoFlowController] Initial generation failed, retrying (${initialGenAttempt}/${VideoFlowController.GENERATION_MAX_RETRIES + 1}): ${errorMsg}`);
           await this.delay(VideoFlowController.GENERATION_RETRY_DELAY_MS);
-          
-          // Navigate back to Flow homepage for fresh start
-          window.location.href = 'https://labs.google/fx/tools/flow';
-          await this.delay(3000); // Wait for page load
-          
-          // Re-run createNewProject for fresh state
-          await this.executeStep('createNewProject', () => this.createNewProject());
+
+          if (config.continueFromCurrent) {
+            // "Add To Prompt" flow retry: remove and re-add ingredient
+            try {
+              await this.clickRemoveFromPrompt();
+            } catch { /* ignore if nothing to remove */ }
+            await this.delay(1000);
+            if (config.imageUuid) {
+              await this.executeStep('switchToImagesTab', () => this.switchToImagesTab());
+              await this.executeStep('clickAddToPromptByUuid', () => this.clickAddToPromptByUuid(config.imageUuid!));
+              await this.executeStep('switchToFramesToVideo', () => this.switchToFramesToVideo());
+            }
+          } else {
+            // Legacy flow: navigate back and create new project
+            window.location.href = 'https://labs.google/fx/tools/flow';
+            await this.delay(3000); // Wait for page load
+            await this.executeStep('createNewProject', () => this.createNewProject());
+          }
         }
       }
 
       // Phase 4: Add to scene (transition to scenebuilder)
-      await this.executeStep('clickAddToScene', () => this.clickAddToScene());
+      // Skip for "Add To Prompt" flow WITHOUT extensions — video stays in project, no scenebuilder needed.
+      // Extension ON (multiple prompts) still needs scenebuilder for "Extend" clips.
+      if (!config.continueFromCurrent || config.prompts.length > 1) {
+        await this.executeStep('clickAddToScene', () => this.clickAddToScene());
+      }
 
       // Phase 5: Extensions (if any)
       for (let i = 1; i < config.prompts.length; i++) {
@@ -1801,17 +2685,18 @@ class VideoFlowController {
         }
       }
 
-      // Phase 6: Download
-      if (config.autoDownload) {
+      // Phase 6: Download (scenebuilder export — only when we entered scenebuilder)
+      const enteredScenebuilder = !config.continueFromCurrent || config.prompts.length > 1;
+      if (config.autoDownload && enteredScenebuilder) {
         await this.executeStep('downloadVideo', () => this.downloadVideo());
         downloaded = true;
       }
 
-      return { success: true, completedPrompts, downloaded };
+      return { success: true, completedPrompts, downloaded, videoUuids };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('[VideoFlowController] Workflow failed:', errorMsg);
-      return { success: false, error: errorMsg, completedPrompts, downloaded };
+      return { success: false, error: errorMsg, completedPrompts, downloaded, videoUuids };
     }
   }
 }
@@ -1887,6 +2772,7 @@ const IMAGE_FLOW_RECOVERY_KEY = 'imageFlowRecovery';
 const DEFAULT_IMAGE_STEP_CONFIG: Record<string, ImageStepRetryConfig> = {
   ensureCreateImageMode:  { maxAttempts: 3, retryDelayMs: 500,  timeoutMs: 10000 },
   configureSettings:      { maxAttempts: 2, retryDelayMs: 500,  timeoutMs: 15000 },
+  addToPromptByUuid:      { maxAttempts: 3, retryDelayMs: 2000, timeoutMs: 30000 },
   openImagePicker:        { maxAttempts: 3, retryDelayMs: 500,  timeoutMs: 10000 },
   uploadImage:            { maxAttempts: 3, retryDelayMs: 1000, timeoutMs: 30000 },
   handleCrop:             { maxAttempts: 2, retryDelayMs: 500,  timeoutMs: 15000 },
@@ -1989,6 +2875,9 @@ class ImageFlowController {
   
   // Workflow session timestamp (shared across all sets for consistent folder naming)
   private workflowTimestamp: string | null = null;
+  
+  // Story mode: remember aspect ratio from init for handleCrop during reference upload
+  private storyAspectRatio: '9:16' | '16:9' = '9:16';
 
   constructor(
     stepConfigOverrides?: Partial<Record<string, Partial<ImageStepRetryConfig>>>,
@@ -2521,6 +3410,190 @@ class ImageFlowController {
       config.timeoutMs
     );
     await this.delay(200);
+  }
+
+  // ─── "Add To Prompt" by UUID (for reference images already in gallery) ───
+
+  /**
+   * Find the gallery scroll container by structural properties.
+   * Works for both Images and Videos galleries — detects the overflow:auto div
+   * that contains media elements (img or video).
+   */
+  private findImageGalleryScrollContainer(): HTMLElement | null {
+    const allDivs = document.querySelectorAll('div');
+    for (const el of allDivs) {
+      const style = getComputedStyle(el);
+      const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                            style.overflowY === 'auto' || style.overflowY === 'scroll';
+      if (isScrollable && el.scrollHeight > el.clientHeight + 100 && (el as HTMLElement).clientHeight > 200) {
+        if (el.querySelectorAll('img[alt^="Flow Image:"]').length > 0) {
+          return el as HTMLElement;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Find a gallery image by UUID using incremental scroll.
+   * The gallery may be virtualized (especially with many images), so we scroll
+   * step-by-step and check at each position.
+   */
+  private async scrollToFindImageByUuid(imageUuid: string): Promise<HTMLElement | null> {
+    const container = this.findImageGalleryScrollContainer();
+    if (!container) {
+      console.warn('[ImageFlowController] Gallery scroll container not found');
+      // Fallback: try direct query without scrolling
+      return document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
+    }
+
+    const clientHeight = container.clientHeight;
+    const stepSize = Math.floor(clientHeight * 0.7);
+    const maxSteps = Math.ceil(container.scrollHeight / stepSize) + 2;
+
+    container.scrollTop = 0;
+    await this.delay(300);
+
+    for (let step = 0; step < maxSteps; step++) {
+      const imgEl = document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
+      if (imgEl) {
+        console.log(`[ImageFlowController] Found image UUID ${imageUuid.substring(0, 8)}... at scroll step ${step}`);
+        return imgEl;
+      }
+
+      container.scrollTop += stepSize;
+      await this.delay(500);
+
+      if (container.scrollTop + container.clientHeight >= container.scrollHeight - 10) {
+        const lastCheck = document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
+        if (lastCheck) return lastCheck;
+        break;
+      }
+    }
+
+    console.log(`[ImageFlowController] Image UUID ${imageUuid.substring(0, 8)}... not found after scrolling`);
+    return null;
+  }
+
+  /**
+   * Click "Add To Prompt" on an image in the gallery by its UUID.
+   * This adds the image as an ingredient/reference for the next generation,
+   * replacing the old upload→crop→save flow.
+   */
+  async clickAddToPromptByImageUuid(imageUuid: string): Promise<void> {
+    console.log(`[ImageFlowController] Adding image ${imageUuid.substring(0, 8)}... to prompt via gallery`);
+
+    // Ensure Images tab is active
+    const radios = document.querySelectorAll('button[role="radio"]');
+    for (const r of radios) {
+      if (r.textContent?.includes('Images')) {
+        (r as HTMLElement).click();
+        break;
+      }
+    }
+    await this.waitFor(
+      () => {
+        const active = document.querySelector('button[role="radio"][aria-checked="true"]');
+        return active?.textContent?.includes('Images') ?? false;
+      },
+      'Images tab active',
+      10000
+    );
+    await this.delay(500);
+
+    // Find the image by scrolling incrementally
+    const img = await this.scrollToFindImageByUuid(imageUuid);
+    if (!img) throw new Error(`Gallery image not found for UUID: ${imageUuid}`);
+
+    // Check if image is already added as ingredient (button shows "Remove From Prompt").
+    // Flow may auto-add the latest generated image as an ingredient.
+    const alreadyAdded = (() => {
+      let searchRoot: Element | null = img;
+      for (let i = 0; i < 4 && searchRoot; i++) {
+        searchRoot = searchRoot.parentElement;
+        if (searchRoot) {
+          const buttons = searchRoot.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (btn.textContent?.includes('Remove From Prompt')) return true;
+          }
+        }
+      }
+      return false;
+    })();
+
+    if (alreadyAdded) {
+      console.log(`[ImageFlowController] Image ${imageUuid.substring(0, 8)}... already added as ingredient (Remove From Prompt visible), skipping`);
+      return;
+    }
+
+    // Hover over the image container to reveal overlay buttons
+    const hoverTargets: HTMLElement[] = [];
+    let el: HTMLElement | null = img;
+    for (let i = 0; i < 5 && el; i++) {
+      el = el.parentElement;
+      if (el) hoverTargets.push(el);
+    }
+    for (const target of hoverTargets) {
+      target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    }
+
+    // Wait for "Add To Prompt" or "Remove From Prompt" button to appear near this image
+    let addBtn: HTMLButtonElement | null = null;
+    let alreadyIngredient = false;
+    await this.waitFor(
+      () => {
+        let searchRoot: Element | null = img;
+        for (let i = 0; i < 8 && searchRoot; i++) {
+          searchRoot = searchRoot.parentElement;
+          if (searchRoot) {
+            const buttons = searchRoot.querySelectorAll('button');
+            for (const btn of buttons) {
+              if (btn.textContent?.includes('Remove From Prompt')) {
+                alreadyIngredient = true;
+                return true;
+              }
+              if (btn.textContent?.includes('Add To Prompt')) {
+                addBtn = btn as HTMLButtonElement;
+                return true;
+              }
+            }
+          }
+        }
+        return false;
+      },
+      `Add To Prompt button for image ${imageUuid.substring(0, 8)}`,
+      10000
+    );
+
+    if (alreadyIngredient) {
+      console.log(`[ImageFlowController] Image ${imageUuid.substring(0, 8)}... already an ingredient, skipping click`);
+      return;
+    }
+
+    if (!addBtn) throw new Error(`"Add To Prompt" button not found for image UUID: ${imageUuid}`);
+    addBtn.click();
+
+    // Wait for confirmation — button changes to "Remove From Prompt"
+    await this.waitFor(
+      () => {
+        let searchRoot: Element | null = img;
+        for (let i = 0; i < 8 && searchRoot; i++) {
+          searchRoot = searchRoot.parentElement;
+          if (searchRoot) {
+            const buttons = searchRoot.querySelectorAll('button');
+            for (const btn of buttons) {
+              if (btn.textContent?.includes('Remove From Prompt')) return true;
+            }
+          }
+        }
+        return false;
+      },
+      'ingredient added (Remove From Prompt visible)',
+      10000
+    );
+    await this.delay(500);
+    console.log(`[ImageFlowController] Added image ${imageUuid.substring(0, 8)}... to prompt as ingredient`);
   }
 
   // Store the click interceptor so we can remove it after upload
@@ -3387,6 +4460,7 @@ class ImageFlowController {
    */
   async initStoryMode(aspectRatio: '9:16' | '16:9', imageCount: number, totalScenes: number): Promise<void> {
     this.workflowTimestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+    this.storyAspectRatio = aspectRatio;
     console.log('[ImageFlowController] Story mode init, timestamp:', this.workflowTimestamp);
 
     const initialUUIDsList = await this.collectAllImageUUIDs();
@@ -3398,8 +4472,50 @@ class ImageFlowController {
   }
 
   /**
+   * Capture a generated image by UUID — fetches it from the DOM and returns as base64 data URL.
+   * Used for auto-character reference: scene 1's image is sent as reference for scenes 2+.
+   */
+  private async captureGeneratedImage(uuid: string): Promise<string | null> {
+    try {
+      // Find the image element by UUID (same approach as downloadImages)
+      let img = document.querySelector(`img[src*="${uuid}"]`) as HTMLImageElement;
+      if (!img && uuid.length > 8) {
+        img = document.querySelector(`img[src*="${uuid.substring(0, 8)}"]`) as HTMLImageElement;
+      }
+      if (!img) {
+        console.log(`[ImageFlowController] captureGeneratedImage: image not found for UUID ${uuid}`);
+        return null;
+      }
+
+      // Use 1K resolution for reference (sufficient for character consistency, keeps payload small)
+      const imageUrl = this.getHighResUrl(img.src, 1024);
+      console.log(`[ImageFlowController] captureGeneratedImage: fetching ${imageUrl.substring(0, 80)}...`);
+
+      const response = await fetch(imageUrl);
+      if (!response.ok) {
+        console.error(`[ImageFlowController] captureGeneratedImage: fetch failed ${response.status}`);
+        return null;
+      }
+
+      const blob = await response.blob();
+      const dataUrl = await this.blobToDataUrl(blob);
+      console.log(`[ImageFlowController] captureGeneratedImage: captured (${Math.round(dataUrl.length / 1024)}KB)`);
+      return dataUrl;
+    } catch (error) {
+      console.error('[ImageFlowController] captureGeneratedImage error:', error);
+      return null;
+    }
+  }
+
+  /**
    * Execute a single story scene — sidebar calls this once per prompt.
-   * Returns the number of images generated (0 on failure).
+   * 
+   * @param referenceImageUuid - UUID of scene 1's image in the gallery (provided for scenes 2+).
+   *                             Clicks "Add To Prompt" on the gallery image instead of uploading.
+   * @param referenceImage - (Legacy fallback) Base64 data URL of scene 1's image.
+   *                         Only used if referenceImageUuid is not available.
+   * @param captureImage   - If true, capture the first generated image as base64 (scene 1 only).
+   *                         The captured image is returned in `imageBase64` for subsequent scenes.
    */
   async executeStoryScene(
     prompt: string,
@@ -3409,10 +4525,32 @@ class ImageFlowController {
     autoSaveImage: boolean,
     downloadResolution: '1K' | '2K' | '4K',
     isLast: boolean,
-  ): Promise<{ success: boolean; imagesCreated: number; error?: string }> {
-    console.log(`[ImageFlowController] Story scene ${sceneIndex + 1}/${totalScenes}`);
+    referenceImageUuid?: string,
+    referenceImage?: string,
+    captureImage?: boolean,
+  ): Promise<{ success: boolean; imagesCreated: number; error?: string; imageBase64?: string; imageUUIDs?: string[] }> {
+    console.log(`[ImageFlowController] Story scene ${sceneIndex + 1}/${totalScenes}`, {
+      hasReferenceImageUuid: !!referenceImageUuid,
+      hasReferenceImage: !!referenceImage,
+      captureImage: !!captureImage,
+    });
 
     try {
+      // If reference image UUID provided (scenes 2+), use "Add To Prompt" on the gallery image
+      if (referenceImageUuid) {
+        console.log(`[ImageFlowController] Adding reference image ${referenceImageUuid.substring(0, 8)}... via "Add To Prompt"`);
+        await this.executeStep('addToPromptByUuid', () => this.clickAddToPromptByImageUuid(referenceImageUuid), sceneIndex, totalScenes);
+        console.log('[ImageFlowController] Reference image added to prompt successfully');
+      } else if (referenceImage) {
+        // Legacy fallback: upload base64 image
+        console.log('[ImageFlowController] Uploading reference image for character consistency (legacy fallback)...');
+        await this.executeStep('openImagePicker', () => this.openImagePicker(), sceneIndex, totalScenes);
+        await this.executeStep('uploadImage', () => this.uploadImage(referenceImage), sceneIndex, totalScenes);
+        await this.executeStep('handleCrop', () => this.handleCrop(this.storyAspectRatio), sceneIndex, totalScenes);
+        await this.executeStep('waitAllImagesUploaded', () => this.waitAllImagesUploaded(1), sceneIndex, totalScenes);
+        console.log('[ImageFlowController] Reference image uploaded successfully');
+      }
+
       // Fill prompt text
       await this.executeStep('fillPrompt', () => this.fillPrompt(prompt), sceneIndex, totalScenes);
 
@@ -3426,6 +4564,19 @@ class ImageFlowController {
 
       // Track new UUIDs
       newUUIDs.forEach(uuid => this.initialUUIDs.add(uuid));
+
+      // Capture scene 1's image for auto-character reference
+      let imageBase64: string | undefined;
+      if (captureImage && newUUIDs.length > 0) {
+        console.log('[ImageFlowController] Capturing scene 1 image for character reference...');
+        const captured = await this.captureGeneratedImage(newUUIDs[0]);
+        if (captured) {
+          imageBase64 = captured;
+          console.log('[ImageFlowController] Scene 1 image captured successfully');
+        } else {
+          console.warn('[ImageFlowController] Failed to capture scene 1 image — scenes 2+ will not have auto-reference');
+        }
+      }
 
       // Download if enabled
       if (autoSaveImage && newUUIDs.length > 0) {
@@ -3444,7 +4595,7 @@ class ImageFlowController {
         flowImageTracker.stop();
       }
 
-      return { success: true, imagesCreated: newUUIDs.length };
+      return { success: true, imagesCreated: newUUIDs.length, imageBase64, imageUUIDs: newUUIDs };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[ImageFlowController] Story scene ${sceneIndex + 1} failed:`, errorMsg);
@@ -3460,7 +4611,7 @@ class ImageFlowController {
         flowImageTracker.stop();
       }
 
-      return { success: false, imagesCreated: 0, error: errorMsg };
+      return { success: false, imagesCreated: 0, error: errorMsg, imageUUIDs: [] };
     }
   }
 }
@@ -4709,14 +5860,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         try {
 const videoConfig: VideoSetConfig = {
             image: message.image,
+            imageUuid: message.imageUuid,
             prompts: message.prompts || [],
             aspectRatio: message.aspectRatio || '9:16',
             outputCount: message.videoCount || 1,
             autoDownload: message.autoDownload ?? true,
+            continueFromCurrent: message.continueFromCurrent ?? false,
           };
 
           console.log('[START_VIDEO_WORKFLOW] Starting with config:', {
             hasImage: !!videoConfig.image,
+            imageUuid: videoConfig.imageUuid?.substring(0, 8),
+            continueFromCurrent: videoConfig.continueFromCurrent,
             promptCount: videoConfig.prompts.length,
             aspectRatio: videoConfig.aspectRatio,
             outputCount: videoConfig.outputCount,
@@ -4765,6 +5920,148 @@ const videoConfig: VideoSetConfig = {
       })();
       return true; // Keep message channel open for async response
 
+    case 'CLICK_ADD_VIDEO_TO_SCENE_BY_UUID':
+      // Lightweight handler: find video, hover, click "Add to scene", return FAST.
+      // Sidebar handles redirect detection and navigation.
+      (async () => {
+        try {
+          const { videoUuid } = message;
+          let controller = videoFlowController;
+          let createdTemp = false;
+          if (!controller) {
+            controller = new VideoFlowController(
+              {},
+              (event: VideoProgressEvent) => {
+                chrome.runtime.sendMessage({
+                  type: 'VIDEO_PROGRESS',
+                  ...event,
+                }).catch(() => {});
+              }
+            );
+            createdTemp = true;
+          }
+
+          const result = await controller.clickAddToSceneByUuid(videoUuid);
+          console.log('[CLICK_ADD_VIDEO_TO_SCENE_BY_UUID] Result:', result);
+          sendResponse(result);
+
+          if (createdTemp) {
+            controller.destroy();
+          }
+        } catch (e) {
+          console.error('[CLICK_ADD_VIDEO_TO_SCENE_BY_UUID] Error:', e);
+          sendResponse({ status: 'not_found', error: String(e) });
+        }
+      })();
+      return true;
+
+    case 'NAVIGATE_BACK_TO_PROJECT':
+      // Navigate from scenebuilder back to project page via breadcrumb
+      (async () => {
+        try {
+          let controller = videoFlowController;
+          let createdTemp = false;
+          if (!controller) {
+            controller = new VideoFlowController(
+              {},
+              (event: VideoProgressEvent) => {
+                chrome.runtime.sendMessage({
+                  type: 'VIDEO_PROGRESS',
+                  ...event,
+                }).catch(() => {});
+              }
+            );
+            createdTemp = true;
+          }
+
+          await controller.navigateBackToProject();
+          sendResponse({ success: true });
+
+          if (createdTemp) {
+            controller.destroy();
+          }
+        } catch (e) {
+          console.error('[NAVIGATE_BACK_TO_PROJECT] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true;
+
+    case 'GET_VIEWPORT_WIDTH':
+      // Return the content area's actual innerWidth so the sidebar can calculate resize
+      sendResponse({ innerWidth: window.innerWidth });
+      return false;
+
+    case 'SWITCH_TO_VIDEOS_TAB':
+      // Ensure the Videos tab is active on the project page
+      (async () => {
+        try {
+          let controller = videoFlowController;
+          let createdTemp = false;
+          if (!controller) {
+            controller = new VideoFlowController(
+              {},
+              (event: VideoProgressEvent) => {
+                chrome.runtime.sendMessage({
+                  type: 'VIDEO_PROGRESS',
+                  ...event,
+                }).catch(() => {});
+              }
+            );
+            createdTemp = true;
+          }
+
+          await controller.switchToVideosTab();
+          sendResponse({ success: true });
+
+          if (createdTemp) {
+            controller.destroy();
+          }
+        } catch (e) {
+          console.error('[SWITCH_TO_VIDEOS_TAB] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true;
+
+    case 'DOWNLOAD_SCENE_VIDEO':
+      (async () => {
+        try {
+          // Create a temp controller if needed (page may have reloaded since add-to-scene)
+          let controller = videoFlowController;
+          let createdTemp = false;
+          if (!controller) {
+            controller = new VideoFlowController(
+              {},
+              (event: VideoProgressEvent) => {
+                chrome.runtime.sendMessage({
+                  type: 'VIDEO_PROGRESS',
+                  ...event,
+                }).catch(() => {});
+              }
+            );
+            createdTemp = true;
+          }
+
+          // Optional flag: save to ShopEnginX/ folder instead of browser default
+          if (message.downloadToFolder) {
+            controller.downloadToFolder = true;
+          }
+
+          const result = await controller.navigateAndDownloadSceneVideo();
+          console.log('[DOWNLOAD_SCENE_VIDEO] Result:', result);
+          sendResponse(result);
+
+          if (createdTemp) {
+            controller.destroy();
+          }
+        } catch (e) {
+          console.error('[DOWNLOAD_SCENE_VIDEO] Error:', e);
+          sendResponse({ success: false, error: String(e) });
+        }
+      })();
+      return true; // Keep message channel open for async response
+
     case 'STOP_VIDEO_WORKFLOW':
       try {
         if (videoFlowController) {
@@ -4793,6 +6090,48 @@ const videoConfig: VideoSetConfig = {
         sendResponse({ success: false, error: String(e) });
       }
       break;
+
+    case 'ADD_VIDEOS_TO_SCENE_IN_ORDER':
+      (async () => {
+        try {
+          const videoUuidsInOrder: string[] = message.videoUuidsInOrder || [];
+          console.log('[ADD_VIDEOS_TO_SCENE_IN_ORDER] Starting with', videoUuidsInOrder.length, 'video UUIDs');
+
+          if (videoUuidsInOrder.length === 0) {
+            sendResponse({ success: false, addedCount: 0, notFoundUuids: [], error: 'No video UUIDs provided' });
+            return;
+          }
+
+          // Create a temporary controller if none exists (workflow may have been cleaned up after generation)
+          let controller = videoFlowController;
+          let createdTemp = false;
+          if (!controller) {
+            controller = new VideoFlowController(
+              message.stepConfig || {},
+              (event: VideoProgressEvent) => {
+                chrome.runtime.sendMessage({
+                  type: 'VIDEO_PROGRESS',
+                  ...event,
+                }).catch(() => {});
+              }
+            );
+            createdTemp = true;
+          }
+
+          const result = await controller.addAllVideosToSceneInOrder(videoUuidsInOrder);
+          console.log('[ADD_VIDEOS_TO_SCENE_IN_ORDER] Result:', result);
+          sendResponse(result);
+
+          // Cleanup temp controller
+          if (createdTemp) {
+            controller.destroy();
+          }
+        } catch (e) {
+          console.error('[ADD_VIDEOS_TO_SCENE_IN_ORDER] Error:', e);
+          sendResponse({ success: false, addedCount: 0, notFoundUuids: [], error: String(e) });
+        }
+      })();
+      return true; // Keep message channel open for async response
 
     // ==================== Image Flow Handlers (Event-Driven) ====================
 
@@ -4928,11 +6267,15 @@ const videoConfig: VideoSetConfig = {
           const autoSaveImage = message.autoSaveImage ?? true;
           const downloadResolution = message.downloadResolution || '1K';
           const isLast = message.isLast ?? false;
+          const referenceImageUuid: string | undefined = message.referenceImageUuid;
+          const referenceImage: string | undefined = message.referenceImage;
+          const captureImage: boolean = message.captureImage ?? false;
 
-          console.log(`[CREATE_STORY_SCENE] Scene ${sceneIndex + 1}/${totalScenes}, isLast=${isLast}`);
+          console.log(`[CREATE_STORY_SCENE] Scene ${sceneIndex + 1}/${totalScenes}, isLast=${isLast}, hasRefUuid=${!!referenceImageUuid}, hasRef=${!!referenceImage}, capture=${captureImage}`);
 
           const result = await imageFlowController.executeStoryScene(
-            prompt, sceneIndex, totalScenes, imageCount, autoSaveImage, downloadResolution, isLast
+            prompt, sceneIndex, totalScenes, imageCount, autoSaveImage, downloadResolution, isLast,
+            referenceImageUuid, referenceImage, captureImage
           );
 
           console.log(`[CREATE_STORY_SCENE] Scene ${sceneIndex + 1} result:`, result);

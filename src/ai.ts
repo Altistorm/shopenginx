@@ -58,10 +58,6 @@ async function callGemini(
   const body = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents: [{ parts: [{ text: userPrompt }] }],
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 4096,
-    },
   }
 
   const res = await fetch(url, {

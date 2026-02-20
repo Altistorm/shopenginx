@@ -1,16 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-
-interface VideoProgressEvent {
-  step: string;
-  attempt: number;
-  maxAttempts: number;
-  status: 'running' | 'success' | 'retrying' | 'failed';
-  promptIndex?: number;
-  totalPrompts?: number;
-  imageIndex?: number;
-  totalImages?: number;
-  error?: string;
-}
+import { useState } from 'react'
+import { useVideoWorkflow, getVideoStepDisplayName } from '../hooks/useVideoWorkflow'
 
 function VideoTab() {
   // Dance style default prompts
@@ -20,40 +9,31 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
   // Form state
   const [startFrameImages, setStartFrameImages] = useState<string[]>([])
-  const [imageStatuses, setImageStatuses] = useState<Array<{ failed: boolean; url?: string; completedPrompts?: number }>>([])
-  const [currentImageIndex, setCurrentImageIndex] = useState<number | null>(null)
   const [prompts, setPrompts] = useState<string[]>([''])
   const [style, setStyle] = useState('tiktok_real')
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16')
   const [videoCount, setVideoCount] = useState(1)
   const [noTextOnVideo, setNoTextOnVideo] = useState(true)
   const [autoDownload, setAutoDownload] = useState(true)
+  const [downloadToFolder, setDownloadToFolder] = useState(true)
+
+  // Shared video workflow hook
+  const {
+    startVideo,
+    stopVideo,
+    isRunning,
+    progress,
+    result,
+    currentImageIndex,
+    imageStatuses,
+  } = useVideoWorkflow()
 
   const handleStyleChange = (newStyle: string) => {
     setStyle(newStyle)
     if (newStyle === 'dance') {
-      // Auto-populate prompts for dance style: 1 initial + 2 extensions
       setPrompts([DANCE_INITIAL_PROMPT, DANCE_EXTENSION_PROMPT, DANCE_EXTENSION_PROMPT])
     }
   }
-
-  // Workflow state
-  const [isRunning, setIsRunning] = useState(false)
-  const stopRequestedRef = useRef(false)
-  const [progress, setProgress] = useState<VideoProgressEvent | null>(null)
-  const [result, setResult] = useState<{ success: boolean; error?: string; completedPrompts?: number } | null>(null)
-
-  // Listen for progress updates
-  useEffect(() => {
-    const handleMessage = (message: { type: string } & VideoProgressEvent) => {
-      if (message.type === 'VIDEO_PROGRESS') {
-        setProgress(message)
-      }
-    }
-
-    chrome.runtime.onMessage.addListener(handleMessage)
-    return () => chrome.runtime.onMessage.removeListener(handleMessage)
-  }, [])
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
@@ -70,8 +50,6 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
   const removeImage = (index: number) => {
     setStartFrameImages(prev => prev.filter((_, i) => i !== index))
-    // Also remove the corresponding status
-    setImageStatuses(prev => prev.filter((_, i) => i !== index))
   }
 
   const handlePromptChange = (index: number, value: string) => {
@@ -92,156 +70,18 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
   }
 
   const handleStart = async () => {
-    // Validate
     const validPrompts = prompts.filter(p => p.trim())
     if (validPrompts.length === 0) {
       alert('Please enter at least one prompt')
       return
     }
 
-    setIsRunning(true)
-    setProgress(null)
-    setResult(null)
-    stopRequestedRef.current = false
-    setImageStatuses(startFrameImages.map(() => ({ failed: false })))
-    setCurrentImageIndex(null)
+    const jobs = (startFrameImages.length > 0 ? startFrameImages : [null as string | null]).map(image => ({
+      image,
+      prompts: validPrompts,
+    }))
 
-    try {
-      const imagesToProcess = startFrameImages.length > 0 ? startFrameImages : [null]
-      const results: { success: boolean; error?: string; completedPrompts?: number }[] = []
-
-      for (let imgIndex = 0; imgIndex < imagesToProcess.length; imgIndex++) {
-        // Check if stop was requested
-        if (stopRequestedRef.current) {
-          console.log('[VideoTab] Stop requested, breaking loop')
-          break
-        }
-        const currentImage = imagesToProcess[imgIndex]
-
-        // Update current image index for UI highlight
-        setCurrentImageIndex(imgIndex)
-
-        // Update progress with image index
-        setProgress({
-          step: 'startingImage',
-          attempt: 1,
-          maxAttempts: 1,
-          status: 'running',
-          imageIndex: imgIndex,
-          totalImages: imagesToProcess.length,
-        })
-
-        // Get active tab (re-query each iteration — tab may have navigated)
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-        if (!tab?.id) {
-          throw new Error('No active tab found')
-        }
-
-        // Ensure tab is on Google Flow
-        if (!tab.url?.includes('labs.google/fx/tools/flow')) {
-          throw new Error('Please navigate to Google Flow first (labs.google/fx/tools/flow)')
-        }
-        // Navigate to Flow homepage if on a project page
-        if (!tab.url.match(/\/fx\/tools\/flow\/?$/)) {
-          await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
-          await new Promise(resolve => setTimeout(resolve, 5000))
-        }
-
-        // Send single image workflow
-        const response = await chrome.tabs.sendMessage(tab.id, {
-          type: 'START_VIDEO_WORKFLOW',
-          image: currentImage,
-          prompts: validPrompts,
-          style,
-          aspectRatio,
-          videoCount,
-          noTextOnVideo,
-          autoDownload,
-        })
-
-        results.push(response)
-
-         // Update image status - capture URL if failed
-         if (!response.success && startFrameImages.length > 0) {
-           const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true })
-           setImageStatuses(prev => {
-             const updated = [...prev]
-             if (updated[imgIndex]) {
-               updated[imgIndex] = { 
-                 failed: true, 
-                 url: currentTab?.url,
-                 completedPrompts: response.completedPrompts || 0
-               }
-             }
-             return updated
-           })
-         }
-
-        // Check if stop was requested OR if workflow was aborted
-        if (stopRequestedRef.current || response.error?.includes('aborted')) {
-          console.log('[VideoTab] Stop requested or workflow aborted, breaking loop')
-          break
-        }
-
-        // Navigate back to Flow homepage for next image (not after last)
-        if (imgIndex < imagesToProcess.length - 1) {
-          await chrome.tabs.update(tab.id, { url: 'https://labs.google/fx/tools/flow' })
-          await new Promise(resolve => setTimeout(resolve, 5000))
-        }
-      }
-
-      // Aggregate results
-      const successCount = results.filter(r => r.success).length
-      setResult({
-        success: results.every(r => r.success),
-        completedPrompts: successCount,
-        error: successCount < results.length
-          ? successCount + '/' + results.length + ' videos completed'
-          : undefined,
-      })
-    } catch (error) {
-      setResult({
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    } finally {
-      setIsRunning(false)
-      setProgress(null)
-      setCurrentImageIndex(null)
-    }
-  }
-
-  const handleStop = async () => {
-    stopRequestedRef.current = true
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-      if (tab?.id) {
-        await chrome.tabs.sendMessage(tab.id, { type: 'STOP_VIDEO_WORKFLOW' })
-      }
-    } catch (error) {
-      console.error('Failed to stop workflow:', error)
-    }
-    setIsRunning(false)
-    setProgress(null)
-  }
-
-  const getStepDisplayName = (step: string): string => {
-    const names: Record<string, string> = {
-      createNewProject: 'Creating new project',
-      startingImage: 'Starting image',
-      ensureVideoMode: 'Setting video mode',
-      configureSettings: 'Configuring settings',
-      uploadImage: 'Uploading start frame',
-      fillPrompt: 'Filling prompt',
-      clickCreate: 'Starting generation',
-      waitForInitialComplete: 'Generating video',
-      clickAddToScene: 'Adding to scene',
-      enterExtendMode: 'Entering extend mode',
-      fillExtensionPrompt: 'Filling extension prompt',
-      waitForExtensionComplete: 'Generating extension',
-      downloadVideo: 'Downloading video',
-    }
-    return names[step] || step
+    await startVideo(jobs, { style, aspectRatio, videoCount, noTextOnVideo, autoDownload, downloadToFolder })
   }
 
   return (
@@ -447,6 +287,17 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
           />
           <span className="select-text">💾 Auto Download วิดีโอ</span>
         </label>
+
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
+          <input
+            type="checkbox"
+            className="checkbox checkbox-primary checkbox-xs"
+            checked={downloadToFolder}
+            onChange={(e) => setDownloadToFolder(e.target.checked)}
+            disabled={isRunning || !autoDownload}
+          />
+          <span className={`select-text ${!autoDownload ? 'opacity-50' : ''}`}>📁 Save to ShopEnginX folder</span>
+        </label>
       </div>
 
       {/* Progress Display */}
@@ -458,7 +309,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
               {progress.status === 'success' && <span>✓</span>}
               {progress.status === 'retrying' && <span>⟳</span>}
               {progress.status === 'failed' && <span>✗</span>}
-              <span className="font-medium">{getStepDisplayName(progress.step)}</span>
+              <span className="font-medium">{getVideoStepDisplayName(progress.step)}</span>
             </div>
             {progress.totalImages && progress.totalImages > 1 && (
               <div className="text-sm mt-1">
@@ -487,7 +338,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
         <div className={`alert ${result.success ? 'alert-success' : 'alert-error'}`}>
           <div>
             {result.success ? (
-              <span>Video created successfully! ({result.completedPrompts} clips)</span>
+              <span>Video created successfully! ({result.completedCount} clips)</span>
             ) : (
               <span>Failed: {result.error}</span>
             )}
@@ -497,7 +348,7 @@ Full body shot of an attractive young woman dancing K-pop style in the front of 
 
       {/* Action Buttons */}
       {isRunning ? (
-        <button className="btn btn-error w-full" onClick={handleStop}>
+        <button className="btn btn-error w-full" onClick={stopVideo}>
           Stop
         </button>
       ) : (
