@@ -68,6 +68,7 @@ export interface VideoOptions {
   downloadToFolder?: boolean     // If true, save video to ShopEnginX/ subfolder instead of browser default
   continueFromCurrent?: boolean  // If true, skip navigation + new project, use "Add To Prompt" flow
   scenePromptsInOrder?: string[] // (deprecated, UUIDs used instead) Ordered video prompts for legacy matching
+  onJobComplete?: (jobIndex: number, success: boolean) => Promise<void>  // Checkpoint callback after each video job
 }
 
 export interface VideoResult {
@@ -224,6 +225,15 @@ export function useVideoWorkflow() {
             }
             return updated
           })
+        }
+
+        // Checkpoint callback — save progress after each video job
+        if (options.onJobComplete) {
+          try {
+            await options.onJobComplete(jobIndex, response.success)
+          } catch (err) {
+            console.warn('[useVideoWorkflow] onJobComplete callback failed:', err)
+          }
         }
 
         // Check if stop was requested or workflow was aborted

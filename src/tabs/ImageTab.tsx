@@ -1,7 +1,19 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, VIDEO_TYPE_GROUPS, IMAGE_STYLES } from '../storyPrompts'
 import { useVideoWorkflow, type SceneData } from '../hooks/useVideoWorkflow'
 import StoryboardPanel from '../components/StoryboardPanel'
+import {
+  type WorkflowCheckpoint,
+  type WorkflowConfig,
+  type WorkflowStory,
+  saveToStorage,
+  loadFromStorage,
+  clearFromStorage,
+  hasIncompleteWork,
+  getProgressSummary,
+  downloadCheckpointFile,
+  importCheckpoint,
+} from '../checkpoint'
 
 // Progress event type from content script
 interface ImageProgressEvent {
@@ -78,7 +90,96 @@ function ImageTab() {
     currentImageIndex: videoCurrentIndex,
     imageStatuses: videoImageStatuses,
   } = useVideoWorkflow()
+
+  // ── Checkpoint & Resume state ──
+  const [pendingCheckpoint, setPendingCheckpoint] = useState<WorkflowCheckpoint | null>(null)
+  const [showResumeBanner, setShowResumeBanner] = useState(false)
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [exportIncludeImages, setExportIncludeImages] = useState(false)
+  const scenesRef = useRef(scenes)
+  scenesRef.current = scenes
   const [showJsonModal, setShowJsonModal] = useState(false)
+
+  // ── Checkpoint: collect current state into serializable object ──
+  const collectCheckpoint = useCallback((): WorkflowCheckpoint => {
+    const config: WorkflowConfig = {
+      style, aspectRatio, imageCount, noTextOnImage, autoSaveImage,
+      downloadResolution, downloadToFolder, autoGenerateVideo, videoExtensionMode,
+      referenceStyle, storyMood, videoType, storySceneCount, storyTopic, productName, scene,
+    }
+    const story: WorkflowStory = {
+      title: storyTitle,
+      characters: storyCharacters,
+      storyboardPrompt,
+      storyboardPreviewUuid,
+    }
+    return {
+      version: 1,
+      createdAt: pendingCheckpoint?.createdAt ?? Date.now(),
+      updatedAt: Date.now(),
+      config,
+      story,
+      scenes: scenesRef.current,
+    }
+  }, [
+    style, aspectRatio, imageCount, noTextOnImage, autoSaveImage,
+    downloadResolution, downloadToFolder, autoGenerateVideo, videoExtensionMode,
+    referenceStyle, storyMood, videoType, storySceneCount, storyTopic, productName, scene,
+    storyTitle, storyCharacters, storyboardPrompt, storyboardPreviewUuid, pendingCheckpoint,
+  ])
+
+  // ── Checkpoint: restore all state from a checkpoint ──
+  const restoreCheckpoint = useCallback((cp: WorkflowCheckpoint) => {
+    // Config
+    setStyle(cp.config.style)
+    setAspectRatio(cp.config.aspectRatio)
+    setImageCount(cp.config.imageCount)
+    setNoTextOnImage(cp.config.noTextOnImage)
+    setAutoSaveImage(cp.config.autoSaveImage)
+    setDownloadResolution(cp.config.downloadResolution)
+    setDownloadToFolder(cp.config.downloadToFolder)
+    setAutoGenerateVideo(cp.config.autoGenerateVideo)
+    setVideoExtensionMode(cp.config.videoExtensionMode)
+    setReferenceStyle(cp.config.referenceStyle)
+    setStoryMood(cp.config.storyMood)
+    setVideoType(cp.config.videoType)
+    setStorySceneCount(cp.config.storySceneCount)
+    setStoryTopic(cp.config.storyTopic)
+    setProductName(cp.config.productName)
+    setScene(cp.config.scene)
+    // Story
+    setStoryTitle(cp.story.title)
+    setStoryCharacters(cp.story.characters)
+    setStoryboardPrompt(cp.story.storyboardPrompt)
+    setStoryboardPreviewUuid(cp.story.storyboardPreviewUuid ?? null)
+    // Scenes (with progress flags)
+    setScenes(cp.scenes)
+    // Ensure story mode is selected
+    setMultiSetMode('story')
+    setPendingCheckpoint(cp)
+  }, [])
+
+  // ── Checkpoint: save current state to chrome.storage.local ──
+  const saveCurrentCheckpoint = useCallback(async () => {
+    try {
+      const cp = collectCheckpoint()
+      await saveToStorage(cp)
+    } catch (err) {
+      console.warn('[Checkpoint] Save failed:', err)
+    }
+  }, [collectCheckpoint])
+
+  // ── Checkpoint: load on mount ──
+  useEffect(() => {
+    loadFromStorage().then(cp => {
+      if (cp && hasIncompleteWork(cp)) {
+        setPendingCheckpoint(cp)
+        setShowResumeBanner(true)
+      }
+    }).catch(err => {
+      console.warn('[Checkpoint] Load failed:', err)
+    })
+  }, [])
 
   // Listen for progress updates from content script
   useEffect(() => {
@@ -176,12 +277,15 @@ function ImageTab() {
 
     try {
       if (multiSetMode === 'story') {
-        // ==================== Story Mode — Sidebar-Controlled ====================
+        // ==================== Story Mode — Sidebar-Controlled (with Checkpoint) ====================
         const validScenes = scenes.filter(s => s.startFramePrompt.trim())
         const total = validScenes.length
 
         console.log(`[handleCreate] Story mode: ${total} scenes, sidebar-controlled`)
         setStoryTotalScenes(total)
+
+        // 💾 SAVE #0: Initial checkpoint (marks workflow started)
+        await saveCurrentCheckpoint()
 
         const initResp = await chrome.tabs.sendMessage(tab.id!, {
           type: 'INIT_STORY_MODE',
@@ -208,9 +312,25 @@ function ImageTab() {
         let autoCharRefUuid: string | null = null
         let autoCharRef: string | null = null
 
+        // Restore charRef from scene 0 if resuming (scene 0 already completed)
+        const scene0 = validScenes[0]
+        if (scene0?.imageCreated) {
+          if (scene0.startFrameImageUuid) autoCharRefUuid = scene0.startFrameImageUuid
+          if (scene0.startFrameImage) autoCharRef = scene0.startFrameImage
+        }
+
+        // ── PHASE 1: Start Frame Loop ──
         for (let i = 0; i < total; i++) {
           setStoryCurrentScene(i + 1)
           const currentScene = validScenes[i]
+
+          // Skip if already completed (resume logic)
+          if (currentScene.imageCreated) {
+            completedScenes++
+            console.log(`[handleCreate] Scene ${i + 1}/${total}: start frame already done, skipping`)
+            continue
+          }
+
           const shouldCapture = i === 0 || autoGenerateVideo
 
           const sceneResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
@@ -251,11 +371,14 @@ function ImageTab() {
                 : s
             ))
           }
+
+          // 💾 SAVE after every start frame attempt
+          await saveCurrentCheckpoint()
         }
 
         setStoryCurrentScene(null)
 
-        // Step 2b: Generate end frames (second pass, only for scenes with endFramePrompt)
+        // ── PHASE 2: End Frame Loop ──
         const scenesWithEndFrame = validScenes.filter(s => s.endFramePrompt.trim())
         if (scenesWithEndFrame.length > 0) {
           const endInitResp = await chrome.tabs.sendMessage(tab.id!, {
@@ -269,6 +392,12 @@ function ImageTab() {
             for (let i = 0; i < scenesWithEndFrame.length; i++) {
               setStoryCurrentScene(i + 1)
               const currentScene = scenesWithEndFrame[i]
+
+              // Skip if already completed (resume logic)
+              if (currentScene.endFrameCreated) {
+                console.log(`[handleCreate] Scene ${currentScene.sceneIndex + 1}: end frame already done, skipping`)
+                continue
+              }
 
               const endResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
                 await chrome.tabs.sendMessage(tab.id!, {
@@ -297,16 +426,20 @@ function ImageTab() {
                     : s
                 ))
               }
+
+              // 💾 SAVE after every end frame attempt
+              await saveCurrentCheckpoint()
             }
             setStoryCurrentScene(null)
           }
         }
 
-        // Step 3: Auto-generate videos if enabled
+        // ── PHASE 3: Auto-generate videos if enabled ──
         let completedVideos = 0
         let videoTotal = 0
         if (autoGenerateVideo) {
-          const scenesForVideo = validScenes.filter((_, i) => i < completedScenes)
+          // Only generate videos for scenes with completed start frames and no video yet
+          const scenesForVideo = validScenes.filter(s => s.imageCreated && !s.videoCreated)
           if (scenesForVideo.length > 0) {
             const hasUuids = !!autoCharRefUuid
 
@@ -338,15 +471,50 @@ function ImageTab() {
               downloadToFolder,
               continueFromCurrent: hasUuids,
               scenePromptsInOrder: !videoExtensionMode ? videoJobs.map(j => j.prompts[0]) : undefined,
+              // 💾 Checkpoint callback: mark scene videoCreated + save after each video job
+              onJobComplete: async (jobIndex: number, success: boolean) => {
+                if (success && !videoExtensionMode) {
+                  // In separate mode, each job = one scene
+                  const targetScene = scenesForVideo[jobIndex]
+                  if (targetScene) {
+                    setScenes(prev => prev.map(s =>
+                      s.sceneIndex === targetScene.sceneIndex
+                        ? { ...s, videoCreated: true }
+                        : s
+                    ))
+                  }
+                }
+                await saveCurrentCheckpoint()
+              },
             })
 
             completedVideos = videoResult.completedCount
             videoTotal = videoResult.totalCount
+
+            // In extension mode, mark all scenes as videoCreated on full success
+            if (videoExtensionMode && videoResult.success) {
+              setScenes(prev => prev.map(s => {
+                const isTarget = scenesForVideo.some(sv => sv.sceneIndex === s.sceneIndex)
+                return isTarget ? { ...s, videoCreated: true } : s
+              }))
+            }
           }
+
+          // 💾 SAVE after video phase
+          await saveCurrentCheckpoint()
+        }
+
+        const allDone = completedScenes === total && (!autoGenerateVideo || completedVideos === videoTotal)
+
+        // Clear checkpoint on full success
+        if (allDone) {
+          await clearFromStorage()
+          setPendingCheckpoint(null)
+          setShowResumeBanner(false)
         }
 
         setResult({
-          success: completedScenes === total && (!autoGenerateVideo || completedVideos === videoTotal),
+          success: allDone,
           completedSets: completedScenes,
           totalSets: total,
           error: completedScenes < total
@@ -787,6 +955,51 @@ function ImageTab() {
 
   return (
     <div className="space-y-2">
+      {/* Resume Banner — shown when checkpoint with incomplete work is found */}
+      {showResumeBanner && pendingCheckpoint && (() => {
+        const summary = getProgressSummary(pendingCheckpoint)
+        return (
+          <div className="alert alert-warning py-3 shadow-lg">
+            <div className="flex-1">
+              <div className="font-bold text-sm mb-1">⚠️ พบงานค้าง</div>
+              <div className="text-xs space-y-0.5">
+                <div>{summary.totalScenes} ฉาก: Start {summary.startFramesDone}/{summary.totalScenes}
+                  {summary.scenesWithEndFrame > 0 && ` | End ${summary.endFramesDone}/${summary.scenesWithEndFrame}`}
+                  {` | Video ${summary.videosDone}/${summary.totalScenes}`}
+                </div>
+              </div>
+              <div className="flex gap-2 mt-2">
+                <button
+                  className="btn btn-sm btn-primary gap-1"
+                  onClick={() => {
+                    restoreCheckpoint(pendingCheckpoint)
+                    setShowResumeBanner(false)
+                  }}
+                >
+                  ▶️ ทำต่อ
+                </button>
+                <button
+                  className="btn btn-sm btn-ghost gap-1"
+                  onClick={async () => {
+                    await clearFromStorage()
+                    setPendingCheckpoint(null)
+                    setShowResumeBanner(false)
+                  }}
+                >
+                  🗑️ เริ่มใหม่
+                </button>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  onClick={() => setShowResumeBanner(false)}
+                >
+                  ยกเลิก
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Mode selection (radio buttons) */}
       <div className="space-y-1">
         <label className={`flex items-center gap-2 cursor-pointer px-2 py-1 rounded-lg transition-colors text-sm ${multiSetMode === 'story' ? 'bg-primary/10 border border-primary/30' : 'bg-base-300 hover:bg-base-100'}`}>
@@ -1342,7 +1555,7 @@ function ImageTab() {
 
           {/* Characters + JSON buttons (shown after AI generates data) */}
           {(storyCharacters.length > 0 || scenes.length > 0) && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {storyCharacters.length > 0 && (
                 <button
                   className="btn btn-ghost btn-xs gap-1"
@@ -1360,6 +1573,44 @@ function ImageTab() {
                   {'{ }'}
                 </button>
               )}
+              {/* Checkpoint Export/Import */}
+              {scenes.length > 0 && (
+                <button
+                  className="btn btn-ghost btn-xs gap-1"
+                  onClick={() => setShowExportModal(true)}
+                  title="บันทึก Checkpoint"
+                >
+                  💾 Export
+                </button>
+              )}
+              <button
+                className="btn btn-ghost btn-xs gap-1"
+                onClick={() => {
+                  const input = document.createElement('input')
+                  input.type = 'file'
+                  input.accept = '.json'
+                  input.onchange = (e) => {
+                    const file = (e.target as HTMLInputElement).files?.[0]
+                    if (!file) return
+                    const reader = new FileReader()
+                    reader.onload = (ev) => {
+                      const json = ev.target?.result as string
+                      const cp = importCheckpoint(json)
+                      if (cp) {
+                        restoreCheckpoint(cp)
+                        setValidationError(null)
+                      } else {
+                        setValidationError('ไฟล์ Checkpoint ไม่ถูกต้อง หรือ version ไม่ตรง')
+                      }
+                    }
+                    reader.readAsText(file)
+                  }
+                  input.click()
+                }}
+                title="นำเข้า Checkpoint"
+              >
+                📂 Import
+              </button>
             </div>
           )}
           {/* Storyboard Scene Cards */}
@@ -1531,6 +1782,53 @@ function ImageTab() {
             </pre>
             <div className="modal-action">
               <button className="btn btn-sm" onClick={() => setShowJsonModal(false)}>ปิด</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Checkpoint Modal */}
+      {showExportModal && (
+        <div className="modal modal-open" onClick={() => setShowExportModal(false)}>
+          <div className="modal-box max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-bold text-lg mb-3">💾 Export Checkpoint</h3>
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-sm"
+                  checked={exportIncludeImages}
+                  onChange={(e) => setExportIncludeImages(e.target.checked)}
+                />
+                <span className="text-sm">รวมรูปภาพ (base64) — ไฟล์จะใหญ่ขึ้นมาก</span>
+              </label>
+              <div className="text-xs text-base-content/50">
+                {'ไม่รวมรูป: ~50-100 KB | รวมรูป: 10-80 MB'}
+              </div>
+            </div>
+            <div className="modal-action">
+              <button
+                className="btn btn-primary btn-sm gap-1"
+                onClick={() => {
+                  const cp = collectCheckpoint()
+                  downloadCheckpointFile(cp, exportIncludeImages)
+                  setShowExportModal(false)
+                }}
+              >
+                ⬇️ ดาวน์โหลด
+              </button>
+              <button
+                className="btn btn-sm gap-1"
+                onClick={() => {
+                  const cp = collectCheckpoint()
+                  const json = exportIncludeImages ? JSON.stringify(cp, null, 2) : JSON.stringify(cp.scenes.map(s => ({...s, startFrameImage: undefined, endFrameImage: undefined, videoUrl: undefined})), null, 2)
+                  navigator.clipboard.writeText(json)
+                  setShowExportModal(false)
+                }}
+              >
+                📋 Copy
+              </button>
+              <button className="btn btn-sm btn-ghost" onClick={() => setShowExportModal(false)}>ปิด</button>
             </div>
           </div>
         </div>
