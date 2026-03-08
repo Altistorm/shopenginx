@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, type GeneratedScene } from '../storyPrompts'
+import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, VIDEO_TYPE_GROUPS, IMAGE_STYLES } from '../storyPrompts'
 import { useVideoWorkflow, type SceneData } from '../hooks/useVideoWorkflow'
+import StoryboardPanel from '../components/StoryboardPanel'
 
 // Progress event type from content script
 interface ImageProgressEvent {
@@ -37,22 +38,27 @@ function ImageTab() {
   const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('1K')
   const [autoGenerateVideo, setAutoGenerateVideo] = useState(false)
   const [videoExtensionMode, setVideoExtensionMode] = useState(false)
-  const [videoPrompts, setVideoPrompts] = useState<string[]>([])
-  const [videoScripts, setVideoScripts] = useState<string[]>([])
+  const [scenes, setScenes] = useState<SceneData[]>([])
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
-  const [storyPrompts, setStoryPrompts] = useState<string[]>([''])
   const [referenceStyle, setReferenceStyle] = useState('pixar_3d')
   const [storyMood, setStoryMood] = useState('grumpy')
+  const [videoType, setVideoType] = useState('')
+  const [activeVideoTypeGroup, setActiveVideoTypeGroup] = useState('ขาย/โปรโมท')
   const [storySceneCount, setStorySceneCount] = useState(4)
   const [storyTopic, setStoryTopic] = useState('')
   const [storyAutoWording, setStoryAutoWording] = useState(false)
   const [storyTitle, setStoryTitle] = useState('')
   const [storyCharacters, setStoryCharacters] = useState<StoryCharacter[]>([])
-  const [storySceneData, setStorySceneData] = useState<GeneratedScene[]>([])
+  const [storyboardPrompt, setStoryboardPrompt] = useState('')
+  const [storyboardPreviewImage, setStoryboardPreviewImage] = useState<string | null>(null)
+  const [storyboardPreviewUuid, setStoryboardPreviewUuid] = useState<string | null>(null)
+  const [generatingPreview, setGeneratingPreview] = useState(false)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiLoadingIndex, setAiLoadingIndex] = useState<number | null>(null)
   const [isRunning, setIsRunning] = useState(false)
+  const [generatingImage, setGeneratingImage] = useState<string | null>(null)
+  const [generatingVideo, setGeneratingVideo] = useState<string | null>(null)
 
   const [validationError, setValidationError] = useState<string | null>(null)
   
@@ -133,8 +139,8 @@ function ImageTab() {
       }
     } else if (multiSetMode === 'story') {
       // Story mode: require at least one prompt
-      const validPrompts = storyPrompts.filter(p => p.trim())
-      if (validPrompts.length === 0) {
+      const validScenes = scenes.filter(s => s.startFramePrompt.trim())
+      if (validScenes.length === 0) {
         setValidationError('กรุณาใส่ Prompt อย่างน้อย 1 รายการ')
         return
       }
@@ -171,13 +177,12 @@ function ImageTab() {
     try {
       if (multiSetMode === 'story') {
         // ==================== Story Mode — Sidebar-Controlled ====================
-        const validPrompts = storyPrompts.filter(p => p.trim())
-        const total = validPrompts.length
+        const validScenes = scenes.filter(s => s.startFramePrompt.trim())
+        const total = validScenes.length
 
         console.log(`[handleCreate] Story mode: ${total} scenes, sidebar-controlled`)
         setStoryTotalScenes(total)
 
-        // Step 1: Init story mode (once)
         const initResp = await chrome.tabs.sendMessage(tab.id!, {
           type: 'INIT_STORY_MODE',
           aspectRatio,
@@ -191,42 +196,35 @@ function ImageTab() {
           return
         }
 
-         // Build character reference text (appended to every prompt)
         let charRefText = ''
         if (storyCharacters.length > 0) {
           const charDesc = storyCharacters.map(c => `${c.name}: ${c.appearance}`).join('; ')
           charRefText = `\n\n[Character Reference: ${charDesc}]`
         }
 
-        // Instruction for scenes 2+ when a reference image ingredient is uploaded.
-        // Without this, Google Flow copies the entire scene 1 (background, composition, pose)
-        // instead of only matching the character appearance.
         const ingredientInstruction = `\n\n[IMPORTANT: The ingredient image is ONLY a reference for character appearance and art style/tone consistency. Do NOT copy its background, composition, camera angle, or pose. Generate a completely NEW scene with a DIFFERENT background and setting as described in this prompt. Match the characters and visual tone only.]`
 
-        // Step 2: Loop through scenes one at a time
         let completedScenes = 0
-        let autoCharRefUuid: string | null = null  // scene 1's image UUID for "Add To Prompt" reference
-        let autoCharRef: string | null = null      // scene 1's image base64 (legacy fallback)
-        const scenes: SceneData[] = []
+        let autoCharRefUuid: string | null = null
+        let autoCharRef: string | null = null
 
         for (let i = 0; i < total; i++) {
           setStoryCurrentScene(i + 1)
-
-          // Capture scene 1 always (for char ref), capture all if autoGenerateVideo
+          const currentScene = validScenes[i]
           const shouldCapture = i === 0 || autoGenerateVideo
 
           const sceneResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
             await chrome.tabs.sendMessage(tab.id!, {
               type: 'CREATE_STORY_SCENE',
-              prompt: validPrompts[i] + charRefText + (i > 0 ? ingredientInstruction : ''),
+              prompt: currentScene.startFramePrompt + charRefText + (i > 0 ? ingredientInstruction : ''),
               sceneIndex: i,
               totalScenes: total,
               imageCount,
               autoSaveImage,
               downloadResolution,
-              isLast: !autoGenerateVideo && i === total - 1,  // if video follows, don't cleanup on last image scene
+              isLast: !autoGenerateVideo && i === total - 1,
               referenceImageUuid: i > 0 ? autoCharRefUuid : undefined,
-              referenceImage: i > 0 && !autoCharRefUuid ? autoCharRef : undefined,  // legacy fallback
+              referenceImage: i > 0 && !autoCharRefUuid ? autoCharRef : undefined,
               captureImage: shouldCapture,
             })
 
@@ -234,72 +232,117 @@ function ImageTab() {
 
           if (sceneResp?.success) {
             completedScenes++
-            // Prefer UUID for "Add To Prompt" (no upload needed), fall back to base64
             if (i === 0 && sceneResp.imageUUIDs?.[0]) {
               autoCharRefUuid = sceneResp.imageUUIDs[0]
-              console.log(`[handleCreate] Saved scene 1 image UUID for reference: ${autoCharRefUuid}`)
             }
             if (i === 0 && sceneResp.imageBase64) {
               autoCharRef = sceneResp.imageBase64
-              console.log(`[handleCreate] Saved scene 1 base64 as fallback reference (${Math.round(autoCharRef!.length / 1024)}KB)`)
             }
-            // Collect scene data for video generation
-            if (autoGenerateVideo && sceneResp.imageBase64) {
-              const vp = videoPrompts[i]?.trim() || storySceneData[i]?.videoPrompt || validPrompts[i]
-              const script = videoScripts[i]?.trim() || storySceneData[i]?.script || ''
-              const fullVideoPrompt = script ? `${vp}\n\nScript: "${script}"` : vp
-              scenes.push({
-                sceneIndex: i,
-                imagePrompt: validPrompts[i],
-                imageUuid: sceneResp.imageUUIDs?.[0],
-                imageBase64: sceneResp.imageBase64,
-                videoPrompt: fullVideoPrompt,
-                script,
-                imageCreated: true,
-                videoCreated: false,
-                addedToScene: false,
-              })
-            }
+
+            // Update scene with runtime data
+            setScenes(prev => prev.map(s =>
+              s.sceneIndex === currentScene.sceneIndex
+                ? {
+                    ...s,
+                    startFrameImage: sceneResp.imageBase64,
+                    startFrameImageUuid: sceneResp.imageUUIDs?.[0],
+                    imageCreated: true,
+                  }
+                : s
+            ))
           }
         }
 
         setStoryCurrentScene(null)
 
-        // Step 3: Auto-generate videos if enabled (using shared hook)
-        let completedVideos = 0
-        let videoTotal = 0
-        if (autoGenerateVideo && scenes.length > 0) {
-          // Use "Add To Prompt" flow if UUIDs are available (same project, no upload needed)
-          const hasUuids = scenes.some(s => s.imageUuid)
-
-          const videoJobs = videoExtensionMode
-            ? [{
-                // Extension mode: 1 video, all prompts as extensions (~8s + 7s per extension)
-                image: hasUuids ? null : (scenes[0].imageBase64 as string | null),
-                imageUuid: scenes[0].imageUuid,
-                prompts: scenes.map(s => s.videoPrompt),
-              }]
-            : scenes.map(s => ({
-                // Normal mode: separate video per scene (~8s each)
-                image: hasUuids ? null : (s.imageBase64 as string | null),
-                imageUuid: s.imageUuid,
-                prompts: [s.videoPrompt],
-              }))
-
-          console.log(`[handleCreate] Video generation: ${videoExtensionMode ? 'extension' : 'separate'} mode, ${videoJobs.length} job(s) via useVideoWorkflow, continueFromCurrent=${hasUuids}`)
-
-          const videoResult = await startVideo(videoJobs, {
+        // Step 2b: Generate end frames (second pass, only for scenes with endFramePrompt)
+        const scenesWithEndFrame = validScenes.filter(s => s.endFramePrompt.trim())
+        if (scenesWithEndFrame.length > 0) {
+          const endInitResp = await chrome.tabs.sendMessage(tab.id!, {
+            type: 'INIT_STORY_MODE',
             aspectRatio,
-            videoCount: 1,
-            autoDownload: autoSaveImage,
-            downloadToFolder,
-            continueFromCurrent: hasUuids,
-            // Pass ordered prompts so "add to scene" can match videos by prompt text
-            scenePromptsInOrder: !videoExtensionMode ? scenes.map(s => s.videoPrompt) : undefined,
+            imageCount,
+            totalScenes: scenesWithEndFrame.length,
           })
 
-          completedVideos = videoResult.completedCount
-          videoTotal = videoResult.totalCount
+          if (endInitResp?.success) {
+            for (let i = 0; i < scenesWithEndFrame.length; i++) {
+              setStoryCurrentScene(i + 1)
+              const currentScene = scenesWithEndFrame[i]
+
+              const endResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
+                await chrome.tabs.sendMessage(tab.id!, {
+                  type: 'CREATE_STORY_SCENE',
+                  prompt: currentScene.endFramePrompt + charRefText + (currentScene.sceneIndex > 0 ? ingredientInstruction : ''),
+                  sceneIndex: i,
+                  totalScenes: scenesWithEndFrame.length,
+                  imageCount,
+                  autoSaveImage,
+                  downloadResolution,
+                  isLast: i === scenesWithEndFrame.length - 1,
+                  referenceImageUuid: autoCharRefUuid || undefined,
+                  referenceImage: !autoCharRefUuid ? autoCharRef : undefined,
+                  captureImage: false,
+                })
+
+              if (endResp?.success) {
+                setScenes(prev => prev.map(s =>
+                  s.sceneIndex === currentScene.sceneIndex
+                    ? {
+                        ...s,
+                        endFrameImage: endResp.imageBase64,
+                        endFrameImageUuid: endResp.imageUUIDs?.[0],
+                        endFrameCreated: true,
+                      }
+                    : s
+                ))
+              }
+            }
+            setStoryCurrentScene(null)
+          }
+        }
+
+        // Step 3: Auto-generate videos if enabled
+        let completedVideos = 0
+        let videoTotal = 0
+        if (autoGenerateVideo) {
+          const scenesForVideo = validScenes.filter((_, i) => i < completedScenes)
+          if (scenesForVideo.length > 0) {
+            const hasUuids = !!autoCharRefUuid
+
+            const videoJobs = videoExtensionMode
+              ? [{
+                  image: hasUuids ? null : autoCharRef,
+                  imageUuid: autoCharRefUuid || undefined,
+                  prompts: scenesForVideo.map(s => {
+                    const vp = s.videoPrompt.trim() || s.startFramePrompt
+                    return s.script ? `${vp}\n\nScript: "${s.script}"` : vp
+                  }),
+                }]
+              : scenesForVideo.map((s, idx) => {
+                  const vp = s.videoPrompt.trim() || s.startFramePrompt
+                  const fullPrompt = s.script ? `${vp}\n\nScript: "${s.script}"` : vp
+                  return {
+                    image: hasUuids ? null : (idx === 0 ? autoCharRef : null),
+                    imageUuid: idx === 0 ? autoCharRefUuid || undefined : undefined,
+                    prompts: [fullPrompt],
+                  }
+                })
+
+            console.log(`[handleCreate] Video generation: ${videoExtensionMode ? 'extension' : 'separate'} mode, ${videoJobs.length} job(s)`)
+
+            const videoResult = await startVideo(videoJobs, {
+              aspectRatio,
+              videoCount: 1,
+              autoDownload: autoSaveImage,
+              downloadToFolder,
+              continueFromCurrent: hasUuids,
+              scenePromptsInOrder: !videoExtensionMode ? videoJobs.map(j => j.prompts[0]) : undefined,
+            })
+
+            completedVideos = videoResult.completedCount
+            videoTotal = videoResult.totalCount
+          }
         }
 
         setResult({
@@ -402,21 +445,25 @@ function ImageTab() {
   const handleMultiSetChange = (mode: 'none' | 'story' | 'multi' | 'sameModel') => {
     setMultiSetMode(mode)
     if (mode === 'story') {
-      // Initialize prompts to match scene count, default 1 image per scene
-      setStoryPrompts(prev => {
-        if (prev.length < storySceneCount) {
-          return [...prev, ...Array(storySceneCount - prev.length).fill('')]
+      // Initialize scenes array to match scene count
+      setScenes(prev => {
+        const target = storySceneCount
+        if (prev.length < target) {
+          return [...prev, ...Array(target - prev.length).fill(null).map((_, i) => ({
+            sceneIndex: prev.length + i,
+            sceneType: (prev.length + i === 0 ? 'hook' : prev.length + i === target - 1 ? 'cta' : 'story') as SceneData['sceneType'],
+            description: '',
+            startFramePrompt: '',
+            endFramePrompt: '',
+            videoPrompt: '',
+            script: '',
+            imageCreated: false,
+            endFrameCreated: false,
+            videoCreated: false,
+            addedToScene: false,
+          }))]
         }
-        return prev.slice(0, storySceneCount)
-      })
-      // Initialize video prompts/scripts to match scene count
-      setVideoPrompts(prev => {
-        if (prev.length < storySceneCount) return [...prev, ...Array(storySceneCount - prev.length).fill('')]
-        return prev.slice(0, storySceneCount)
-      })
-      setVideoScripts(prev => {
-        if (prev.length < storySceneCount) return [...prev, ...Array(storySceneCount - prev.length).fill('')]
-        return prev.slice(0, storySceneCount)
+        return prev.slice(0, target)
       })
       setImageCount(1)
       setImageSets([])
@@ -444,27 +491,51 @@ function ImageTab() {
         topic: storyTopic || undefined,
         productName: productName || undefined,
         scene: scene || undefined,
+        videoType: videoType || undefined,
       })
 
-      // Store full storyboard data
+      // Store title + characters
       setStoryTitle(result.title)
       setStoryCharacters(result.characters)
-      setStorySceneData(result.scenes)
+      setStoryboardPrompt(result.storyboardPrompt)
+      // Clear previous preview since scenes changed
+      setStoryboardPreviewImage(null)
+      setStoryboardPreviewUuid(null)
 
-      // Extract imagePrompts into the prompts array for editing
-      const newPrompts = result.scenes.map(s => s.imagePrompt)
-      // Pad or trim to match scene count
-      while (newPrompts.length < storySceneCount) newPrompts.push('')
-      setStoryPrompts(newPrompts.slice(0, storySceneCount))
-
-      // Pre-fill video prompts and scripts from AI
-      const newVideoPrompts = result.scenes.map(s => s.videoPrompt || '')
-      while (newVideoPrompts.length < storySceneCount) newVideoPrompts.push('')
-      setVideoPrompts(newVideoPrompts.slice(0, storySceneCount))
-
-      const newVideoScripts = result.scenes.map(s => s.script || '')
-      while (newVideoScripts.length < storySceneCount) newVideoScripts.push('')
-      setVideoScripts(newVideoScripts.slice(0, storySceneCount))
+      // Build SceneData[] from AI result
+      const newScenes: SceneData[] = result.scenes.map((s, i) => ({
+        sceneIndex: i,
+        sceneType: s.sceneType,
+        description: s.description,
+        startFramePrompt: s.imagePrompt,
+        endFramePrompt: '',
+        videoPrompt: s.videoPrompt || '',
+        script: s.script || '',
+        originalStartFramePrompt: s.imagePrompt,
+        originalEndFramePrompt: '',
+        originalVideoPrompt: s.videoPrompt || '',
+        originalScript: s.script || '',
+        imageCreated: false,
+        endFrameCreated: false,
+        videoCreated: false,
+        addedToScene: false,
+      }))
+      while (newScenes.length < storySceneCount) {
+        newScenes.push({
+          sceneIndex: newScenes.length,
+          sceneType: 'story',
+          description: '',
+          startFramePrompt: '',
+          endFramePrompt: '',
+          videoPrompt: '',
+          script: '',
+          imageCreated: false,
+          endFrameCreated: false,
+          videoCreated: false,
+          addedToScene: false,
+        })
+      }
+      setScenes(newScenes.slice(0, storySceneCount))
     } catch (err) {
       setValidationError((err as Error).message)
     } finally {
@@ -472,10 +543,68 @@ function ImageTab() {
     }
   }
 
+  // Generate storyboard preview grid image
+  const handleGenerateStoryboardPreview = async () => {
+    if (!storyboardPrompt.trim()) {
+      setValidationError('กรุณาสร้าง Storyboard ด้วย AI ก่อน (ต้องมี storyboardPrompt)')
+      return
+    }
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
+      setValidationError('กรุณาเปิด Google Flow ก่อน (labs.google/fx/tools/flow)')
+      return
+    }
+
+    setGeneratingPreview(true)
+    setValidationError(null)
+
+    try {
+      // Init story mode for single preview generation
+      const initResp = await chrome.tabs.sendMessage(tab.id!, {
+        type: 'INIT_STORY_MODE',
+        aspectRatio,
+        imageCount: 1,
+        totalScenes: 1,
+      })
+
+      if (!initResp?.success) {
+        setValidationError(`Init failed: ${initResp?.error || 'Unknown error'}`)
+        return
+      }
+
+      // Generate the storyboard grid using storyboardPrompt
+      const resp: { success?: boolean; imageBase64?: string; imageUUIDs?: string[] } =
+        await chrome.tabs.sendMessage(tab.id!, {
+          type: 'CREATE_STORY_SCENE',
+          prompt: storyboardPrompt,
+          sceneIndex: 0,
+          totalScenes: 1,
+          imageCount: 1,
+          autoSaveImage,
+          downloadResolution,
+          isLast: true,
+          captureImage: true,
+        })
+
+      if (resp?.success) {
+        setStoryboardPreviewImage(resp.imageBase64 || null)
+        setStoryboardPreviewUuid(resp.imageUUIDs?.[0] || null)
+      } else {
+        setValidationError('Storyboard preview generation failed')
+      }
+    } catch (err) {
+      setValidationError((err as Error).message)
+    } finally {
+      setGeneratingPreview(false)
+    }
+  }
+
   // AI: Generate single prompt
   const handleGenerateSingle = async (index: number) => {
     setValidationError(null)
-    const currentText = storyPrompts[index]?.trim()
+    const currentScene = scenes[index]
+    const currentText = currentScene?.startFramePrompt?.trim()
     if (!currentText) {
       setValidationError('กรุณาพิมพ์คำอธิบายสั้นๆ ก่อนกด AI')
       return
@@ -483,7 +612,7 @@ function ImageTab() {
     setAiLoadingIndex(index)
     try {
       const isFirst = index === 0
-      const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
+      const isLast = index === scenes.length - 1 && scenes.length > 1
       const sceneType = isFirst ? 'hook' as const : isLast ? 'cta' as const : 'story' as const
 
       const result = await generateSinglePrompt({
@@ -492,13 +621,167 @@ function ImageTab() {
         mood: storyMood,
         sceneType,
       })
-      const newPrompts = [...storyPrompts]
-      newPrompts[index] = result.trim()
-      setStoryPrompts(newPrompts)
+      setScenes(prev => prev.map((s, i) => i === index ? { ...s, startFramePrompt: result.trim() } : s))
     } catch (err) {
       setValidationError((err as Error).message)
     } finally {
       setAiLoadingIndex(null)
+    }
+  }
+
+  // Per-scene image generation (start frame or end frame)
+  const handleGenerateSceneImage = async (sceneIndex: number, type: 'start' | 'end') => {
+    const sceneItem = scenes.find(s => s.sceneIndex === sceneIndex)
+    if (!sceneItem) return
+
+    const prompt = type === 'start' ? sceneItem.startFramePrompt : sceneItem.endFramePrompt
+    if (!prompt.trim()) {
+      setValidationError(`กรุณาใส่ ${type === 'start' ? 'Start Frame' : 'End Frame'} Prompt ก่อน`)
+      return
+    }
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
+      setValidationError('กรุณาเปิด Google Flow ก่อน (labs.google/fx/tools/flow)')
+      return
+    }
+
+    setGeneratingImage(`${type}-${sceneIndex}`)
+    setValidationError(null)
+
+    try {
+      // Determine reference mode: storyboard preview grid vs scene 0
+      const hasPreviewGrid = !!storyboardPreviewImage || !!storyboardPreviewUuid
+      let finalPrompt: string
+      let refUuid: string | undefined
+      let refImage: string | undefined
+
+      if (hasPreviewGrid) {
+        // GRID MODE: use storyboard preview as reference + "find SCENE N" prompt
+        const sceneNum = sceneIndex + 1
+        const styleDesc = IMAGE_STYLES[style]?.split(',')[0] || 'Pixar 3D'
+        finalPrompt = `${styleDesc} style.\n\nThe attached image is a STORYBOARD with multiple scene panels.\nFind and recreate SCENE ${sceneNum} as a single full-frame image.\n\nSCENE ${sceneNum} DESCRIPTION:\n${prompt}\n\nINSTRUCTIONS:\n- Look for the panel labeled "SCENE ${sceneNum}" in the storyboard grid\n- Recreate ONLY that specific panel as a full detailed image\n- Match exactly: character design, pose, expression, background from that panel\n- Output: ONE full image, no grid, no panels, no text labels\n- Single continuous image only, no collage, no multiple frames\n- Fill the ENTIRE frame edge-to-edge, NO black bars, NO letterboxing\n- Do NOT include aspect ratio`
+        refUuid = storyboardPreviewUuid || undefined
+        refImage = !refUuid ? (storyboardPreviewImage || undefined) : undefined
+      } else {
+        // FALLBACK: use scene 0 as character reference (original behavior)
+        let charRefText = ''
+        if (storyCharacters.length > 0) {
+          const charDesc = storyCharacters.map(c => `${c.name}: ${c.appearance}`).join('; ')
+          charRefText = `\n\n[Character Reference: ${charDesc}]`
+        }
+        const ingredientInstruction = sceneIndex > 0
+          ? `\n\n[IMPORTANT: The ingredient image is ONLY a reference for character appearance and art style/tone consistency. Do NOT copy its background, composition, camera angle, or pose. Generate a completely NEW scene with a DIFFERENT background and setting as described in this prompt. Match the characters and visual tone only.]`
+          : ''
+        finalPrompt = prompt + charRefText + ingredientInstruction
+        const scene0 = scenes.find(s => s.sceneIndex === 0)
+        refUuid = sceneIndex > 0 ? scene0?.startFrameImageUuid : undefined
+        refImage = sceneIndex > 0 && !refUuid ? scene0?.startFrameImage : undefined
+      }
+
+      // Init story mode for single scene generation
+      const initResp = await chrome.tabs.sendMessage(tab.id!, {
+        type: 'INIT_STORY_MODE',
+        aspectRatio,
+        imageCount,
+        totalScenes: 1,
+      })
+
+      if (!initResp?.success) {
+        setValidationError(`Init failed: ${initResp?.error || 'Unknown error'}`)
+        return
+      }
+
+      // Generate the single scene image
+      const sceneResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
+        await chrome.tabs.sendMessage(tab.id!, {
+          type: 'CREATE_STORY_SCENE',
+          prompt: finalPrompt,
+          sceneIndex: 0,
+          totalScenes: 1,
+          imageCount,
+          autoSaveImage,
+          downloadResolution,
+          isLast: true,
+          referenceImageUuid: refUuid,
+          referenceImage: refImage,
+          captureImage: true,
+        })
+
+      if (sceneResp?.success) {
+        setScenes(prev => prev.map(s =>
+          s.sceneIndex === sceneIndex
+            ? {
+                ...s,
+                ...(type === 'start'
+                  ? {
+                      startFrameImage: sceneResp.imageBase64,
+                      startFrameImageUuid: sceneResp.imageUUIDs?.[0],
+                      imageCreated: true,
+                    }
+                  : {
+                      endFrameImage: sceneResp.imageBase64,
+                      endFrameImageUuid: sceneResp.imageUUIDs?.[0],
+                      endFrameCreated: true,
+                    }
+                ),
+              }
+            : s
+        ))
+      } else {
+        setValidationError(`Scene ${sceneIndex + 1} ${type} frame failed: ${sceneResp?.error || 'Unknown error'}`)
+      }
+    } catch (err) {
+      setValidationError((err as Error).message)
+    } finally {
+      setGeneratingImage(null)
+    }
+  }
+
+  // Per-scene video generation
+  const handleGenerateSceneVideo = async (sceneIndex: number) => {
+    const sceneItem = scenes.find(s => s.sceneIndex === sceneIndex)
+    if (!sceneItem) return
+
+    if (!sceneItem.startFrameImageUuid && !sceneItem.startFrameImage) {
+      setValidationError('กรุณาสร้าง Start Frame ก่อนสร้างวิดีโอ')
+      return
+    }
+
+    setGeneratingVideo(`video-${sceneIndex}`)
+    setValidationError(null)
+
+    try {
+      const vp = sceneItem.videoPrompt.trim() || sceneItem.startFramePrompt
+      const fullPrompt = sceneItem.script ? `${vp}\n\nScript: "${sceneItem.script}"` : vp
+
+      const job = {
+        image: sceneItem.startFrameImageUuid ? null : (sceneItem.startFrameImage || null),
+        imageUuid: sceneItem.startFrameImageUuid,
+        prompts: [fullPrompt],
+      }
+
+      const videoResult = await startVideo([job], {
+        aspectRatio,
+        videoCount: 1,
+        autoDownload: autoSaveImage,
+        downloadToFolder,
+        continueFromCurrent: !!sceneItem.startFrameImageUuid,
+      })
+
+      if (videoResult.success) {
+        setScenes(prev => prev.map(s =>
+          s.sceneIndex === sceneIndex
+            ? { ...s, videoCreated: true }
+            : s
+        ))
+      } else {
+        setValidationError(`Video generation failed: ${videoResult.error || 'Unknown error'}`)
+      }
+    } catch (err) {
+      setValidationError((err as Error).message)
+    } finally {
+      setGeneratingVideo(null)
     }
   }
 
@@ -793,6 +1076,49 @@ function ImageTab() {
 
 
 
+      {/* Video Type (story mode only) */}
+      {multiSetMode === 'story' && (
+        <div className="form-control">
+          <label className="label py-1">
+            <span className="label-text select-text text-xs">🎬 ประเภทคลิป</span>
+          </label>
+          <div className="space-y-1">
+            {/* Group tabs */}
+            <div className="flex bg-base-200 rounded-md p-0.5 gap-0.5">
+              <button
+                className={`flex-1 px-1 py-0.5 text-[9px] font-medium rounded transition-all ${!videoType ? 'bg-base-100 text-primary shadow-sm' : 'text-base-content/40 hover:text-base-content/60'}`}
+                onClick={() => { setVideoType(''); setActiveVideoTypeGroup('ขาย/โปรโมท') }}
+              >
+                อัตโนมัติ
+              </button>
+              {Object.entries(VIDEO_TYPE_GROUPS).map(([groupName, group]) => (
+                <button
+                  key={groupName}
+                  className={`flex-1 px-1 py-0.5 text-[9px] font-medium rounded transition-all ${activeVideoTypeGroup === groupName ? 'bg-base-100 text-primary shadow-sm' : 'text-base-content/40 hover:text-base-content/60'}`}
+                  onClick={() => setActiveVideoTypeGroup(groupName)}
+                >
+                  {group.emoji} {groupName.split('/')[0]}
+                </button>
+              ))}
+            </div>
+            {/* Type chips within active group */}
+            {videoType !== '' || activeVideoTypeGroup ? (
+              <div className="flex flex-wrap gap-1">
+                {VIDEO_TYPE_GROUPS[activeVideoTypeGroup]?.types.map(typeName => (
+                  <button
+                    key={typeName}
+                    className={`badge badge-sm cursor-pointer select-none ${videoType === typeName ? 'badge-primary' : 'badge-ghost'}`}
+                    onClick={() => setVideoType(typeName)}
+                  >
+                    {typeName}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
       {/* Style + Product Name */}
       <div className="grid grid-cols-2 gap-2">
         <div className="form-control">
@@ -952,20 +1278,23 @@ function ImageTab() {
                 onChange={(e) => {
                   const count = parseInt(e.target.value)
                   setStorySceneCount(count)
-                  // Resize prompts array to match scene count
-                  setStoryPrompts(prev => {
+                  // Resize scenes array to match scene count
+                  setScenes(prev => {
                     if (prev.length < count) {
-                      return [...prev, ...Array(count - prev.length).fill('')]
+                      return [...prev, ...Array(count - prev.length).fill(null).map((_, i) => ({
+                        sceneIndex: prev.length + i,
+                        sceneType: (prev.length + i === count - 1 ? 'cta' : 'story') as SceneData['sceneType'],
+                        description: '',
+                        startFramePrompt: '',
+                        endFramePrompt: '',
+                        videoPrompt: '',
+                        script: '',
+                        imageCreated: false,
+                        endFrameCreated: false,
+                        videoCreated: false,
+                        addedToScene: false,
+                      }))]
                     }
-                    return prev.slice(0, count)
-                  })
-                  // Resize video prompts/scripts to match
-                  setVideoPrompts(prev => {
-                    if (prev.length < count) return [...prev, ...Array(count - prev.length).fill('')]
-                    return prev.slice(0, count)
-                  })
-                  setVideoScripts(prev => {
-                    if (prev.length < count) return [...prev, ...Array(count - prev.length).fill('')]
                     return prev.slice(0, count)
                   })
                 }}
@@ -997,29 +1326,6 @@ function ImageTab() {
             </button>
           </div>
 
-          {/* Characters + JSON buttons (shown after AI generates data) */}
-          {(storyCharacters.length > 0 || storySceneData.length > 0) && (
-            <div className="flex items-center gap-2">
-              {storyCharacters.length > 0 && (
-                <button
-                  className="btn btn-ghost btn-xs gap-1"
-                  onClick={() => setShowCharacterModal(true)}
-                >
-                  👥 ตัวละคร ({storyCharacters.length})
-                </button>
-              )}
-              {storySceneData.length > 0 && (
-                <button
-                  className="btn btn-ghost btn-xs gap-1"
-                  onClick={() => setShowJsonModal(true)}
-                  title="ดู JSON ทั้งหมด"
-                >
-                  {'{ }'}
-                </button>
-              )}
-            </div>
-          )}
-
           {/* Topic */}
           <div className="form-control">
             <label className="label py-1">
@@ -1034,231 +1340,44 @@ function ImageTab() {
             />
           </div>
 
-          {/* Prompt textareas */}
-          <div className="collapse collapse-arrow bg-base-300 rounded-lg">
-            <input type="checkbox" defaultChecked />
-            <div className="collapse-title py-2 min-h-0">
-              <span className="label-text select-text text-xs">📝 Prompt <span className="text-error">*</span></span>
-              <span className="text-base-content/50 text-xs ml-2">
-                {storyPrompts.length} ภาพ
-              </span>
-            </div>
-            <div className="collapse-content space-y-2">
-              {storyPrompts.map((prompt, index) => {
-                const isFirst = index === 0
-                const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
-                const sceneType = isFirst ? 'Hook' : isLast ? 'CTA' : 'Story'
-                const sceneLabel = isFirst
-                  ? `ภาพที่ 1 (${sceneType})`
-                  : isLast
-                    ? `ภาพที่ ${index + 1} (${sceneType})`
-                    : `ภาพที่ ${index + 1} (${sceneType})`
-                const placeholder = isFirst
-                  ? 'ฉากเปิด ดึงดูดสายตา เช่น ตัวละครแสดงอารมณ์ชัดเจน'
-                  : isLast
-                    ? 'ปิดเรื่อง เช่น สรุป/ชวนติดตาม'
-                    : 'เล่าเรื่องต่อ เช่น ตัวละครเจอปัญหา/แก้ปัญหา'
-
-                return (
-                  <div key={index} className="flex gap-2">
-                    <div className="flex-1">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className={`text-xs font-medium ${isFirst ? 'text-warning' : isLast ? 'text-success' : 'text-base-content/50'}`}>
-                          {sceneLabel}
-                        </span>
-                        <button
-                          className="btn btn-ghost btn-xs gap-1 text-secondary"
-                          title="สร้าง Prompt ด้วย AI"
-                          onClick={() => handleGenerateSingle(index)}
-                          disabled={aiLoadingIndex === index}
-                        >
-                          {aiLoadingIndex === index ? '⏳' : '✨'}
-                        </button>
-                      </div>
-                      {storySceneData[index]?.description && (
-                        <div className="text-xs text-base-content/40 mb-1 pl-1">{storySceneData[index].description}</div>
-                      )}
-                      <textarea
-                        className="textarea textarea-bordered w-full text-sm"
-                        rows={8}
-                        placeholder={placeholder}
-                        value={prompt}
-                        onChange={(e) => {
-                          const newPrompts = [...storyPrompts]
-                          newPrompts[index] = e.target.value
-                          setStoryPrompts(newPrompts)
-                        }}
-                      />
-                    </div>
-                    {storyPrompts.length > 2 && (
-                      <button
-                        className="btn btn-ghost btn-sm btn-square text-error self-end mb-1"
-                        onClick={() => setStoryPrompts(prev => prev.filter((_, i) => i !== index))}
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
-              {storyPrompts.length < 8 && (
+          {/* Characters + JSON buttons (shown after AI generates data) */}
+          {(storyCharacters.length > 0 || scenes.length > 0) && (
+            <div className="flex items-center gap-2">
+              {storyCharacters.length > 0 && (
                 <button
-                  className="btn btn-ghost btn-sm mt-2"
-                  onClick={() => setStoryPrompts(prev => [...prev, ''])}
+                  className="btn btn-ghost btn-xs gap-1"
+                  onClick={() => setShowCharacterModal(true)}
                 >
-                  + เพิ่มภาพ
+                  👥 ตัวละคร ({storyCharacters.length})
+                </button>
+              )}
+              {scenes.length > 0 && (
+                <button
+                  className="btn btn-ghost btn-xs gap-1"
+                  onClick={() => setShowJsonModal(true)}
+                  title="ดู JSON ทั้งหมด"
+                >
+                  {'{ }'}
                 </button>
               )}
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Scene */}
-      <div className="form-control">
-        <label className="label py-1">
-          <span className="label-text select-text text-xs">🎬 ฉาก/สถานที่ <span className="opacity-50">(ไม่บังคับ)</span></span>
-        </label>
-        <input
-          type="text"
-          placeholder="เช่น: ในห้องนอน, ริมทะเล, ในสตูดิโอ"
-          className="input input-bordered input-sm"
-          value={scene}
-          onChange={(e) => setScene(e.target.value)}
-        />
-      </div>
-
-      {/* Options */}
-      <div className="space-y-1">
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-primary checkbox-xs"
-            checked={noTextOnImage}
-            onChange={(e) => setNoTextOnImage(e.target.checked)}
-          />
-          <span className="select-text">🚫 ไม่ต้องมีข้อความบนภาพ</span>
-        </label>
-
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-            <input
-              type="checkbox"
-              className="checkbox checkbox-primary checkbox-xs"
-              checked={autoSaveImage}
-              onChange={(e) => setAutoSaveImage(e.target.checked)}
-            />
-            <span className="select-text">💾 Auto Save รูปลงเครื่อง</span>
-          </label>
-          {autoSaveImage && (
-            <select
-              className="select select-bordered select-xs"
-              value={downloadResolution}
-              onChange={(e) => setDownloadResolution(e.target.value as '1K' | '2K' | '4K')}
-            >
-              <option value="1K">1K</option>
-              <option value="2K">2K</option>
-              <option value="4K">4K</option>
-            </select>
           )}
-        </div>
-
-        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-primary checkbox-xs"
-            checked={downloadToFolder}
-            onChange={(e) => setDownloadToFolder(e.target.checked)}
-            disabled={!autoSaveImage}
+          {/* Storyboard Scene Cards */}
+          <StoryboardPanel
+            scenes={scenes}
+            onScenesChange={setScenes}
+            onGenerateSingle={handleGenerateSingle}
+            onGenerateImage={handleGenerateSceneImage}
+            onGenerateVideo={handleGenerateSceneVideo}
+            onAddToScene={() => {}}
+            onGeneratePreview={handleGenerateStoryboardPreview}
+            storyboardPreviewImage={storyboardPreviewImage}
+            generatingPreview={generatingPreview}
+            generatingImage={generatingImage}
+            generatingVideo={generatingVideo}
+            isRunning={isRunning || videoIsRunning || !!generatingImage || !!generatingVideo}
+            maxScenes={8}
           />
-          <span className={`select-text ${!autoSaveImage ? 'opacity-50' : ''}`}>📁 Save to ShopEnginX folder</span>
-        </label>
-
-        {multiSetMode === 'story' && (
-          <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm">
-            <input
-              type="checkbox"
-              className="checkbox checkbox-primary checkbox-xs"
-              checked={autoGenerateVideo}
-              onChange={(e) => setAutoGenerateVideo(e.target.checked)}
-            />
-            <span className="select-text">🎬 สร้างวิดีโอต่ออัตโนมัติ</span>
-          </label>
-        )}
-
-        {multiSetMode === 'story' && autoGenerateVideo && (
-          <label className="flex items-center gap-2 cursor-pointer px-2 py-1 rounded bg-base-300 hover:bg-base-100 transition-colors text-sm ml-6">
-            <input
-              type="checkbox"
-              className="checkbox checkbox-secondary checkbox-xs"
-              checked={videoExtensionMode}
-              onChange={(e) => setVideoExtensionMode(e.target.checked)}
-              disabled={isRunning}
-            />
-            <span className="select-text">🔗 Extension Mode (ต่อเป็นวิดีโอเดียว)</span>
-          </label>
-        )}
-
-      </div>
-
-      {/* Video Prompts + Scripts per Scene (shown when auto-generate video is checked) */}
-      {multiSetMode === 'story' && autoGenerateVideo && (
-        <div className="collapse collapse-arrow bg-base-300 rounded-lg">
-          <input type="checkbox" defaultChecked />
-          <div className="collapse-title py-2 min-h-0">
-            <span className="label-text select-text text-xs">🎬 Video Prompt & Script per Scene</span>
-          </div>
-          <div className="collapse-content space-y-2">
-            {storyPrompts.map((_, index) => {
-              const isFirst = index === 0
-              const isLast = index === storyPrompts.length - 1 && storyPrompts.length > 1
-              const sceneType = isFirst ? 'Hook' : isLast ? 'CTA' : 'Story'
-
-              return (
-                <div key={index} className="bg-base-200 rounded-lg p-3 space-y-2">
-                  <div className={`text-xs font-medium ${isFirst ? 'text-warning' : isLast ? 'text-success' : 'text-base-content/50'}`}>
-                    🎬 Scene {index + 1} ({sceneType})
-                  </div>
-
-                  {/* Video Prompt */}
-                  <div>
-                    <div className="text-xs text-base-content/40 mb-1">Video Prompt</div>
-                    <textarea
-                      className="textarea textarea-bordered w-full text-sm"
-                      rows={4}
-                      placeholder={`Video action prompt for scene ${index + 1}...`}
-                      value={videoPrompts[index] || ''}
-                      onChange={(e) => {
-                        const updated = [...videoPrompts]
-                        while (updated.length <= index) updated.push('')
-                        updated[index] = e.target.value
-                        setVideoPrompts(updated)
-                      }}
-                      disabled={isRunning}
-                    />
-                  </div>
-
-                  {/* Script */}
-                  <div>
-                    <div className="text-xs text-base-content/40 mb-1">📝 Script</div>
-                    <textarea
-                      className="textarea textarea-bordered w-full text-sm"
-                      rows={4}
-                      placeholder={`บทพูด/narration สำหรับ scene ${index + 1}...`}
-                      value={videoScripts[index] || ''}
-                      onChange={(e) => {
-                        const updated = [...videoScripts]
-                        while (updated.length <= index) updated.push('')
-                        updated[index] = e.target.value
-                        setVideoScripts(updated)
-                      }}
-                      disabled={isRunning}
-                    />
-                  </div>
-                </div>
-              )
-            })}
-          </div>
         </div>
       )}
 
@@ -1395,7 +1514,7 @@ function ImageTab() {
                   navigator.clipboard.writeText(JSON.stringify({
                     title: storyTitle,
                     characters: storyCharacters,
-                    scenes: storySceneData,
+                    scenes: scenes,
                   }, null, 2))
                 }}
                 title="Copy JSON"
@@ -1407,7 +1526,7 @@ function ImageTab() {
               {JSON.stringify({
                 title: storyTitle,
                 characters: storyCharacters,
-                scenes: storySceneData,
+                scenes: scenes,
               }, null, 2)}
             </pre>
             <div className="modal-action">

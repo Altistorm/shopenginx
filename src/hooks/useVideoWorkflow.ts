@@ -22,22 +22,39 @@ export interface VideoJob {
 
 /**
  * Unified scene tracker — carries all data for a single scene through the pipeline.
- * Populated incrementally: image gen fills image fields, video gen fills video fields.
+ * Populated incrementally: AI fills prompts, image gen fills image fields, video gen fills video fields.
  */
 export interface SceneData {
   sceneIndex: number
+  sceneType: 'hook' | 'story' | 'cta'
+  description: string
 
-  // ── Image generation ──
-  imagePrompt: string           // prompt sent to "Create Image"
-  imageUuid?: string            // gallery image UUID (for "Add To Prompt" in video flow)
-  imageBase64?: string          // captured image (for character reference in next scenes)
+  // ── Prompts (editable by user) ──
+  startFramePrompt: string       // prompt for start frame image generation
+  endFramePrompt: string         // prompt for end frame image generation
+  videoPrompt: string            // action prompt sent to "Frames to Video"
+  script: string                 // Thai narration/dialogue (for TTS / video overlay)
 
-  // ── Video generation ──
-  videoPrompt: string           // full prompt sent to "Frames to Video" (action + script)
-  script: string                // Thai narration/dialogue (separate for future TTS use)
+  // ── Original AI-generated prompts (immutable, for reset-to-original) ──
+  originalStartFramePrompt?: string
+  originalEndFramePrompt?: string
+  originalVideoPrompt?: string
+  originalScript?: string
 
-  // ── Status ──
+  // ── Start frame image ──
+  startFrameImage?: string       // base64 or blob URL (thumbnail + character reference)
+  startFrameImageUuid?: string   // gallery image UUID (for "Add To Prompt" in video flow)
+
+  // ── End frame image ──
+  endFrameImage?: string         // base64 or blob URL
+  endFrameImageUuid?: string     // gallery image UUID
+
+  // ── Video ──
+  videoUrl?: string              // blob URL for preview
+
+  // ── Status per scene ──
   imageCreated: boolean
+  endFrameCreated: boolean
   videoCreated: boolean
   addedToScene: boolean
 }

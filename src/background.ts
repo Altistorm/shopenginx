@@ -225,6 +225,241 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep message channel open for async response
   }
 
+  // Configure Google Flow settings via Main World (Radix UI tabs don't respond to content script clicks)
+  if (message.action === 'CONFIGURE_FLOW_SETTINGS') {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ success: false, error: 'No tab id' });
+      return true;
+    }
+    const { mode, aspectRatio, imageCount } = message as {
+      mode?: 'image' | 'videocam';
+      aspectRatio?: '9:16' | '16:9';
+      imageCount?: number;
+    };
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (mode: string | undefined, aspectRatio: string | undefined, imageCount: number | undefined) => {
+        const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+        const log = (msg: string) => console.log(`[CONFIGURE_FLOW_SETTINGS] ${msg}`);
+
+        async function run() {
+          // Find the config trigger button
+          const findTrigger = (): HTMLElement | null => {
+            const buttons = document.querySelectorAll('button[aria-haspopup="menu"]');
+            for (const btn of buttons) {
+              if (!(btn as HTMLElement).offsetParent) continue;
+              if (btn.closest('[data-radix-popper-content-wrapper]')) continue;
+              if (btn.closest('[role="menu"]')) continue;
+              if (!btn.querySelector('[data-type="button-overlay"]')) continue;
+              const icons = btn.querySelectorAll('i');
+              for (const icon of icons) {
+                if ((icon.textContent || '').trim().toLowerCase().includes('crop_')) return btn as HTMLElement;
+              }
+            }
+            return null;
+          };
+
+          // Click using pointer events (required for Radix)
+          const clickElement = async (el: HTMLElement) => {
+            const rect = el.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', clientX: x, clientY: y, isPrimary: true }));
+            await wait(50);
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+            await wait(50);
+            el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', clientX: x, clientY: y, isPrimary: true }));
+            await wait(50);
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+            await wait(50);
+            el.click();
+          };
+
+          // Open config popper
+          const trigger = findTrigger();
+          if (!trigger) return { ok: false, err: 'Config trigger button not found' };
+
+          if (trigger.getAttribute('aria-expanded') !== 'true' && trigger.getAttribute('data-state') !== 'open') {
+            await clickElement(trigger);
+            await wait(800);
+          }
+
+          const getPopper = () =>
+            document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
+            document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
+
+          let popper = getPopper();
+          if (!popper) {
+            // Try clicking overlay
+            const overlay = trigger.querySelector('[data-type="button-overlay"]') as HTMLElement;
+            if (overlay) { await clickElement(overlay); await wait(800); }
+            popper = getPopper();
+          }
+          if (!popper) return { ok: false, err: 'Config popper did not open' };
+
+          // Helper: find and click a tab
+          const clickTab = async (iconMatch: string | null, textMatch: string | null): Promise<boolean> => {
+            const tabs = (getPopper() || popper).querySelectorAll('button[role="tab"]');
+            for (const tab of tabs) {
+              if (iconMatch) {
+                const icon = tab.querySelector('i');
+                if (!icon || (icon.textContent || '').trim().toLowerCase() !== iconMatch) continue;
+              } else if (textMatch) {
+                const txt = (tab.textContent || '').trim().toLowerCase();
+                if (txt !== textMatch && txt !== textMatch.replace('x', '')) continue;
+              }
+              if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') {
+                return true; // already active
+              }
+              await clickElement(tab as HTMLElement);
+              await wait(600);
+              // Re-check with fresh reference
+              const freshTabs = (getPopper() || popper).querySelectorAll('button[role="tab"]');
+              for (const ft of freshTabs) {
+                if (iconMatch) {
+                  const fi = ft.querySelector('i');
+                  if (!fi || (fi.textContent || '').trim().toLowerCase() !== iconMatch) continue;
+                } else if (textMatch) {
+                  const txt = (ft.textContent || '').trim().toLowerCase();
+                  if (txt !== textMatch && txt !== textMatch.replace('x', '')) continue;
+                }
+                return ft.getAttribute('data-state') === 'active' || ft.getAttribute('aria-selected') === 'true';
+              }
+              return false;
+            }
+            return false;
+          };
+
+          const results: Record<string, boolean> = {};
+
+          // 1. Select mode tab
+          if (mode) {
+            results.mode = await clickTab(mode, null);
+            log(`Mode ${mode}: ${results.mode ? 'ok' : 'FAILED'}`);
+            await wait(300);
+          }
+
+          // 2. Select aspect ratio tab
+          if (aspectRatio) {
+            const isPortrait = aspectRatio === '9:16';
+            const icon = isPortrait ? 'crop_9_16' : 'crop_16_9';
+            results.ratio = await clickTab(icon, null);
+            log(`Ratio ${aspectRatio}: ${results.ratio ? 'ok' : 'FAILED'}`);
+            await wait(300);
+          }
+
+          // 3. Select output count tab
+          if (imageCount) {
+            results.count = await clickTab(null, `x${imageCount}`);
+            log(`Count ${imageCount}: ${results.count ? 'ok' : 'FAILED'}`);
+            await wait(300);
+          }
+
+          // Close popper
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+          await wait(200);
+          document.body.click();
+          await wait(300);
+
+          return { ok: true, results };
+        }
+
+        return run();
+      },
+      args: [mode, aspectRatio, imageCount],
+    }).then(results => {
+      const result = results?.[0]?.result as { ok: boolean; err?: string; results?: Record<string, boolean> } | undefined;
+      if (result?.ok) {
+        sendResponse({ success: true, results: result.results });
+      } else {
+        console.error('[Background] CONFIGURE_FLOW_SETTINGS failed:', result?.err);
+        sendResponse({ success: false, error: result?.err || 'unknown' });
+      }
+    }).catch(err => {
+      console.error('[Background] CONFIGURE_FLOW_SETTINGS error:', err);
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
+
+  // Slate editor text insertion via Main World (content scripts can't access Slate's React state)
+  if (message.action === 'SLATE_INSERT_TEXT') {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ success: false, error: 'No tab id' });
+      return true;
+    }
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (text: string) => {
+        try {
+          const el = document.querySelector('[data-slate-editor="true"]');
+          if (!el) return { ok: false, err: 'no editor element' };
+          const fiberKey = Object.keys(el).find(
+            k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
+          );
+          if (!fiberKey) return { ok: false, err: 'no react fiber' };
+          let slateEditor: any = null;
+          let fiber = (el as any)[fiberKey];
+          for (let i = 0; i < 50 && fiber; i++) {
+            if (fiber.memoizedProps) {
+              for (const val of Object.values(fiber.memoizedProps)) {
+                if (
+                  val && typeof val === 'object' && !Array.isArray(val) &&
+                  typeof (val as any).insertText === 'function' &&
+                  typeof (val as any).deleteBackward === 'function' &&
+                  Array.isArray((val as any).children)
+                ) {
+                  slateEditor = val;
+                  break;
+                }
+              }
+            }
+            if (slateEditor) break;
+            fiber = fiber.return;
+          }
+          if (!slateEditor) return { ok: false, err: 'no slate editor instance' };
+          el.focus();
+          // Select all existing content and delete it
+          if (slateEditor.children && slateEditor.children.length > 0) {
+            const lastBlockIdx = slateEditor.children.length - 1;
+            const lastBlock = slateEditor.children[lastBlockIdx];
+            const lastInlineIdx = (lastBlock.children || []).length - 1;
+            const lastInline = (lastBlock.children || [])[Math.max(0, lastInlineIdx)];
+            const endOffset = (lastInline?.text || '').length;
+            slateEditor.selection = {
+              anchor: { path: [0, 0], offset: 0 },
+              focus: { path: [lastBlockIdx, Math.max(0, lastInlineIdx)], offset: endOffset },
+            };
+            if (endOffset > 0 || slateEditor.children.length > 1) {
+              slateEditor.deleteFragment();
+            }
+          }
+          slateEditor.insertText(text);
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, err: e.message };
+        }
+      },
+      args: [message.text],
+    }).then(results => {
+      const result = results?.[0]?.result as { ok: boolean; err?: string } | undefined;
+      if (result?.ok) {
+        sendResponse({ success: true });
+      } else {
+        console.error('[Background] SLATE_INSERT_TEXT failed:', result?.err);
+        sendResponse({ success: false, error: result?.err || 'unknown' });
+      }
+    }).catch(err => {
+      console.error('[Background] SLATE_INSERT_TEXT error:', err);
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
+
   // Batch download multiple images
   if (message.action === 'downloadImages') {
     const { images, subfolder } = message as { 

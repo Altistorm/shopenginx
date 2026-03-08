@@ -205,7 +205,7 @@ class FlowImageTracker {
     
     for (const container of resultContainers) {
       // Check if this container has a Flow Image
-      const hasImage = container.querySelector('img[alt^="Flow Image:"]');
+      const hasImage = container.querySelector('img[alt="Generated image"]');
       
       if (!hasImage) {
         // No image = error. Return whatever text is there for logging
@@ -220,13 +220,13 @@ class FlowImageTracker {
 
   // Extract UUID from image src URL
   private extractUUID(src: string): string | null {
-    const match = src.match(/image\/([a-f0-9-]+)/);
+    const match = src.match(/(?:image\/|[?&]name=)([a-f0-9-]+)/);
     return match ? match[1] : null;
   }
 
   // Update the ordered list based on current DOM state
   private updateImageOrder() {
-    const images = document.querySelectorAll('img[alt^="Flow Image:"]');
+    const images = document.querySelectorAll('img[alt="Generated image"]');
     const visibleIds: string[] = [];
     const rawSrcs: string[] = [];
 
@@ -498,7 +498,7 @@ class FlowImageTracker {
             const nodeInfo = node.tagName + (node.className ? '.' + String(node.className).substring(0, 30) : '');
 
             // Check if it's an image or contains images
-            if (node.matches && node.matches('img[alt^="Flow Image:"]')) {
+            if (node.matches && node.matches('img[alt="Generated image"]')) {
               console.log('[FlowImageTracker] 🖼️ Flow Image added directly:', nodeInfo, (node as HTMLImageElement).src?.substring(0, 60));
               hasRelevantChanges = true;
               // Track this image for completion detection
@@ -506,7 +506,7 @@ class FlowImageTracker {
                 this.trackPendingImage(node as HTMLImageElement);
               }
             } else if (node.querySelectorAll) {
-              const imgs = node.querySelectorAll('img[alt^="Flow Image:"]');
+              const imgs = node.querySelectorAll('img[alt="Generated image"]');
               if (imgs.length > 0) {
                 console.log('[FlowImageTracker] 🖼️ Container with Flow Images added:', nodeInfo, 'images:', imgs.length);
                 hasRelevantChanges = true;
@@ -535,7 +535,7 @@ class FlowImageTracker {
         // Check for attribute changes on images (src changes)
         if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
           const target = mutation.target as HTMLElement;
-          if (target.matches && target.matches('img[alt^="Flow Image:"]')) {
+          if (target.matches && target.matches('img[alt="Generated image"]')) {
             console.log('[FlowImageTracker] 🔄 Image src changed:', (target as HTMLImageElement).src?.substring(0, 60));
             hasRelevantChanges = true;
             // Handle src change for completion detection
@@ -593,7 +593,7 @@ class FlowImageTracker {
     this.observer = new MutationObserver(onMutation);
 
     // Find the scroll container or use body
-    const container = document.querySelector('[class*="sc-c884da2c"]') || document.body;
+    const container = document.querySelector('[data-testid="virtuoso-item-list"]') || document.body;
 
     this.observer.observe(container, {
       childList: true,
@@ -754,6 +754,219 @@ const findByText = (selector: string, text: string): HTMLElement | null => {
     }
   }
   return null;
+};
+
+// ─── Radix UI helpers (adapted from KubdeeAutogen's working Google Flow selectors) ───
+
+/** Find the config trigger button using Radix UI patterns (replaces old combobox approach) */
+const findConfigTriggerButton = (): HTMLElement | null => {
+  const buttons = document.querySelectorAll('button[aria-haspopup="menu"]');
+  for (const btn of buttons) {
+    if (!(btn as HTMLElement).offsetParent) continue; // not visible
+    if (btn.closest('[data-radix-popper-content-wrapper]')) continue; // inside a popper
+    if (btn.closest('[role="menu"]')) continue; // inside a menu
+    if (!btn.querySelector('[data-type="button-overlay"]')) continue; // no overlay
+    const icons = btn.querySelectorAll('i');
+    for (const icon of icons) {
+      if ((icon.textContent || '').trim().toLowerCase().includes('crop_')) return btn as HTMLElement;
+    }
+  }
+  return null;
+};
+
+/** Click a Radix trigger button using pointer events (required for Radix to register) */
+const clickRadixTrigger = async (element: HTMLElement): Promise<void> => {
+  const rect = element.getBoundingClientRect();
+  const opts: PointerEventInit = {
+    bubbles: true, cancelable: true, pointerType: 'mouse',
+    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+  };
+  element.dispatchEvent(new PointerEvent('pointerdown', opts));
+  await new Promise(r => setTimeout(r, 100));
+  element.dispatchEvent(new PointerEvent('pointerup', opts));
+  await new Promise(r => setTimeout(r, 100));
+  element.click();
+};
+
+/** Click a Radix tab — tries focus, click, then pointer events until active */
+const clickRadixTab = async (element: HTMLElement): Promise<void> => {
+  const isActive = () =>
+    element.getAttribute('data-state') === 'active' ||
+    element.getAttribute('aria-selected') === 'true';
+  element.focus();
+  await new Promise(r => setTimeout(r, 100));
+  if (isActive()) return;
+  element.click();
+  await new Promise(r => setTimeout(r, 100));
+  if (isActive()) return;
+  // Fallback: pointer events
+  const rect = element.getBoundingClientRect();
+  const opts: PointerEventInit = {
+    bubbles: true, cancelable: true, pointerType: 'mouse',
+    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+  };
+  element.dispatchEvent(new PointerEvent('pointerdown', opts));
+  await new Promise(r => setTimeout(r, 50));
+  element.dispatchEvent(new PointerEvent('pointerup', opts));
+  await new Promise(r => setTimeout(r, 50));
+  element.click();
+};
+
+/** Open the config popper from the trigger button. Returns popper element or null. */
+const openConfigPopper = async (): Promise<HTMLElement | null> => {
+  const triggerBtn = findConfigTriggerButton();
+  if (!triggerBtn) return null;
+  // If already open, return the popper
+  if (triggerBtn.getAttribute('aria-expanded') === 'true' || triggerBtn.getAttribute('data-state') === 'open') {
+    const existing = document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
+      document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
+    if (existing && existing.getBoundingClientRect().height > 0) return existing;
+  }
+  await clickRadixTrigger(triggerBtn);
+  await new Promise(r => setTimeout(r, 800));
+  // Find the opened popper
+  let popper = document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
+    document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
+  if (popper && popper.getBoundingClientRect().height > 0) return popper;
+  // Fallback: try clicking the overlay child
+  const overlay = triggerBtn.querySelector('[data-type="button-overlay"]') as HTMLElement;
+  if (overlay) {
+    await clickRadixTrigger(overlay);
+    await new Promise(r => setTimeout(r, 800));
+  }
+  popper = document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
+    document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
+  if (popper && popper.getBoundingClientRect().height > 0) return popper;
+  return null;
+};
+
+/** Close the config popper via Escape + body click */
+const closeConfigPopper = async (): Promise<void> => {
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  document.body.click();
+  await new Promise(r => setTimeout(r, 300));
+};
+
+/** Re-fetch the open popper element (may have been re-rendered) */
+const refetchPopper = (): HTMLElement | null => {
+  return document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
+    document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
+};
+
+/**
+ * Select a mode tab (IMAGE or VIDEO) inside the config popper.
+ * @param popper - The open popper element
+ * @param mode - 'image' for Create Image, 'videocam' for Frames to Video
+ */
+const selectModeTab = async (popper: HTMLElement, mode: 'image' | 'videocam'): Promise<boolean> => {
+  const targetLabel = mode === 'image' ? 'IMAGE' : 'VIDEO';
+  const tabs = popper.querySelectorAll('button[role="tab"]');
+  for (const tab of tabs) {
+    const icon = tab.querySelector('i');
+    if (!icon) continue;
+    const iconText = (icon.textContent || '').trim().toLowerCase();
+    if (iconText !== mode) continue;
+    // Already active?
+    if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') return true;
+    await clickRadixTab(tab as HTMLElement);
+    await new Promise(r => setTimeout(r, 500));
+    return tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true';
+  }
+  // Fallback: match via aria-controls
+  for (const tab of tabs) {
+    const controls = (tab.getAttribute('aria-controls') || '').toUpperCase();
+    if (controls.includes(targetLabel)) {
+      await clickRadixTab(tab as HTMLElement);
+      await new Promise(r => setTimeout(r, 500));
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Select aspect ratio tab inside the config popper.
+ * Finds button[role="tab"] with <i> icon 'crop_9_16' or 'crop_16_9'.
+ */
+const selectAspectRatioTab = async (popper: HTMLElement, aspectRatio: '9:16' | '16:9'): Promise<boolean> => {
+  const isPortrait = aspectRatio === '9:16';
+  const targetIcon = isPortrait ? 'crop_9_16' : 'crop_16_9';
+  const tabs = popper.querySelectorAll('button[role="tab"]');
+  for (const tab of tabs) {
+    const icon = tab.querySelector('i');
+    if (!icon) continue;
+    const iconText = (icon.textContent || '').trim().toLowerCase();
+    if (iconText !== targetIcon) continue;
+    if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') return true;
+    await clickRadixTab(tab as HTMLElement);
+    await new Promise(r => setTimeout(r, 500));
+    return tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true';
+  }
+  // Fallback: match via aria-controls
+  const targetLabel = isPortrait ? 'PORTRAIT' : 'LANDSCAPE';
+  for (const tab of tabs) {
+    const controls = (tab.getAttribute('aria-controls') || '').toUpperCase();
+    if (controls.includes(targetLabel)) {
+      await clickRadixTab(tab as HTMLElement);
+      await new Promise(r => setTimeout(r, 500));
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Select output count tab inside the config popper.
+ * Looks for button[role="tab"] with text 'x{count}' or '{count}'.
+ */
+const selectOutputCountTab = async (popper: HTMLElement, outputCount: number): Promise<boolean> => {
+  const targetText = `x${outputCount}`;
+  const tabs = popper.querySelectorAll('button[role="tab"]');
+  for (const tab of tabs) {
+    const txt = (tab.textContent || '').trim().toLowerCase();
+    if (txt !== targetText && txt !== String(outputCount)) continue;
+    if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') return true;
+    await clickRadixTab(tab as HTMLElement);
+    await new Promise(r => setTimeout(r, 500));
+    return tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true';
+  }
+  // Fallback: match via aria-controls
+  for (const tab of tabs) {
+    const controls = tab.getAttribute('aria-controls') || '';
+    if (controls.endsWith(`-${outputCount}`)) {
+      await clickRadixTab(tab as HTMLElement);
+      await new Promise(r => setTimeout(r, 500));
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Check current settings from the trigger button (without opening popper).
+ * Reads aspect ratio from icon and output count from button text.
+ */
+const checkCurrentSettings = (aspectRatio?: string, outputCount?: number): { ratioOk: boolean; countOk: boolean } => {
+  const result = { ratioOk: !aspectRatio, countOk: !outputCount };
+  const triggerBtn = findConfigTriggerButton();
+  if (!triggerBtn) return result;
+  if (aspectRatio) {
+    const isPortrait = aspectRatio === '9:16';
+    const targetIconText = isPortrait ? 'crop_9_16' : 'crop_16_9';
+    const icons = triggerBtn.querySelectorAll('i');
+    for (const icon of icons) {
+      if ((icon.textContent || '').trim().toLowerCase().includes(targetIconText)) {
+        result.ratioOk = true;
+        break;
+      }
+    }
+  }
+  if (outputCount) {
+    const btnText = (triggerBtn.textContent || '').trim().toLowerCase();
+    if (btnText.includes(`x${outputCount}`)) result.countOk = true;
+  }
+  return result;
 };
 
 class VideoFlowController {
@@ -981,163 +1194,33 @@ class VideoFlowController {
    * Step: Ensure we're in "Frames to Video" mode
    */
   async ensureVideoMode(): Promise<void> {
-    const config = this.stepConfig['ensureVideoMode'];
-
-    // Check if already in Frames to Video mode
-    const modeDropdown = document.querySelector('[role="combobox"]');
-    if (modeDropdown?.textContent?.includes('Frames to Video')) {
-      console.log('[VideoFlowController] Already in Frames to Video mode');
-      return;
+    // Use Main World to click Radix tabs (content script clicks don't register)
+    const result = await chrome.runtime.sendMessage({
+      action: 'CONFIGURE_FLOW_SETTINGS',
+      mode: 'videocam',
+    });
+    if (!result?.success) {
+      throw new Error(`Switch to video mode failed: ${result?.error || 'unknown'}`);
     }
-
-    // Click mode dropdown
-    const dropdown = findByText('[role="combobox"]', 'arrow_drop_down');
-    if (!dropdown) throw new Error('Mode dropdown not found');
-    dropdown.click();
-
-    // Wait for listbox to appear
-    await this.waitFor(
-      () => document.querySelector('[role="listbox"]') !== null,
-      'mode listbox',
-      config.timeoutMs
-    );
-    await this.delay(200);
-
-    // Click "Frames to Video" option
-    const option = findByText('[role="option"]', 'Frames to Video');
-    if (!option) throw new Error('Frames to Video option not found');
-    option.click();
-
-    // Wait for mode to change
-    await this.waitFor(
-      () => {
-        const current = document.querySelector('[role="combobox"]');
-        return current?.textContent?.includes('Frames to Video') ?? false;
-      },
-      'mode change to Frames to Video',
-      config.timeoutMs
-    );
+    console.log('[VideoFlowController] Switched to Frames to Video mode via Main World');
     await this.delay(300);
   }
 
-/**
-   * Step: Configure settings (aspect ratio + output count) via Settings dialog
+  /**
+   * Step: Configure settings (aspect ratio + output count) via Radix config popper
    */
   async configureSettings(aspectRatio: '9:16' | '16:9', outputCount: number): Promise<void> {
-    const config = this.stepConfig['configureSettings'];
-    const isPortrait = aspectRatio === '9:16';
-    const targetAspectText = isPortrait ? 'Portrait' : 'Landscape';
-
-    // Helper to get fresh dialog reference
-    const getDialog = () => document.querySelector('[role="dialog"]');
-
-    // Open settings dialog
-    const settingsBtn = findButtonByText('Settings');
-    if (!settingsBtn) throw new Error('Settings button not found');
-    console.log('[VideoFlowController] Clicking Settings button');
-    settingsBtn.click();
-
-    // Wait for dialog
-    await this.waitFor(
-      () => getDialog() !== null,
-      'settings dialog',
-      config.timeoutMs
-    );
-    await this.delay(500);
-    console.log('[VideoFlowController] Settings dialog opened');
-
-    // ===== Set Aspect Ratio =====
-    const aspectCombobox = findByText('[role="combobox"]', 'Aspect Ratio');
-    if (aspectCombobox) {
-      // Check if already correct
-      if (!aspectCombobox.textContent?.includes(targetAspectText)) {
-        console.log('[VideoFlowController] Clicking Aspect Ratio combobox');
-        aspectCombobox.click();
-        await this.delay(300);
-
-        // Wait for options
-        await this.waitFor(
-          () => document.querySelectorAll('[role="option"]').length > 0,
-          'aspect ratio options',
-          config.timeoutMs
-        );
-
-        const targetOption = Array.from(document.querySelectorAll('[role="option"]'))
-          .find(el => el.textContent?.includes(targetAspectText));
-        if (targetOption) {
-          console.log('[VideoFlowController] Selecting aspect ratio:', targetAspectText);
-          (targetOption as HTMLElement).click();
-          await this.delay(300);
-
-          // Wait for dropdown to close
-          await this.waitFor(
-            () => document.querySelectorAll('[role="option"]').length === 0,
-            'aspect ratio dropdown close',
-            5000
-          );
-          await this.delay(200);
-        }
-      } else {
-        console.log('[VideoFlowController] Aspect ratio already set to:', targetAspectText);
-      }
+    // Use Main World to click Radix tabs (content script clicks don't register)
+    const result = await chrome.runtime.sendMessage({
+      action: 'CONFIGURE_FLOW_SETTINGS',
+      aspectRatio,
+      imageCount: outputCount,
+    });
+    if (!result?.success) {
+      throw new Error(`Configure settings failed: ${result?.error || 'unknown'}`);
     }
-
-    // ===== Set Output Count =====
-    const outputCombobox = findByText('[role="combobox"]', 'Outputs per prompt');
-    if (outputCombobox) {
-      // Check if already correct
-      const currentCount = outputCombobox.textContent?.match(/\d+/)?.[0];
-      if (currentCount !== String(outputCount)) {
-        console.log('[VideoFlowController] Clicking Outputs per prompt combobox, current:', currentCount);
-        outputCombobox.click();
-        await this.delay(300);
-
-        // Wait for options
-        await this.waitFor(
-          () => document.querySelectorAll('[role="option"]').length > 0,
-          'output count options',
-          config.timeoutMs
-        );
-
-        const allOptions = document.querySelectorAll('[role="option"]');
-        console.log('[VideoFlowController] Found options:', allOptions.length);
-
-        const countOption = Array.from(allOptions)
-          .find(el => el.textContent?.trim() === String(outputCount));
-        if (countOption) {
-          console.log('[VideoFlowController] Selecting output count:', outputCount);
-          (countOption as HTMLElement).click();
-          await this.delay(300);
-
-          // Wait for dropdown to close
-          await this.waitFor(
-            () => document.querySelectorAll('[role="option"]').length === 0,
-            'output count dropdown close',
-            5000
-          );
-          await this.delay(200);
-        } else {
-          console.log('[VideoFlowController] Option not found for count:', outputCount);
-        }
-      } else {
-        console.log('[VideoFlowController] Output count already set to:', outputCount);
-      }
-    } else {
-      console.log('[VideoFlowController] Outputs per prompt combobox not found');
-    }
-
-    // Close dialog with Escape
-    console.log('[VideoFlowController] Closing settings dialog');
-    const escEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-    document.dispatchEvent(escEvent);
-
-    // Wait for dialog to close
-    await this.waitFor(
-      () => getDialog() === null,
-      'settings dialog close',
-      config.timeoutMs
-    );
-    await this.delay(200);
+    console.log('[VideoFlowController] Settings configured via Main World:', result.results);
+    await this.delay(300);
   }
 
   /**
@@ -2092,14 +2175,14 @@ class VideoFlowController {
     // Wait for UI to be fully ready before interacting with prompt
     await this.delay(1000);
 
-    // Find prompt textbox
-    const textbox = document.querySelector('textarea, input[type="text"]') as HTMLInputElement | HTMLTextAreaElement;
-    if (!textbox) throw new Error('Prompt textbox not found');
-
-    textbox.focus();
-    textbox.value = prompt;
-    textbox.dispatchEvent(new Event('input', { bubbles: true }));
-    textbox.dispatchEvent(new Event('change', { bubbles: true }));
+    // Slate editor lives in Main World — content script can't access its React state.
+    // Send to background.ts which uses chrome.scripting.executeScript({ world: 'MAIN' })
+    // to walk React fiber tree and call slateEditor.insertText() directly.
+    const result = await chrome.runtime.sendMessage({ action: 'SLATE_INSERT_TEXT', text: prompt });
+    if (!result?.success) {
+      throw new Error(`Slate insert failed: ${result?.error || 'unknown'}`);
+    }
+    await this.delay(500);
 
     // Wait for Create button to become enabled
     await this.waitFor(
@@ -3109,7 +3192,7 @@ class ImageFlowController {
 
     // Collect all image UUIDs
     const uuids: string[] = [];
-    const images = document.querySelectorAll('img[alt^="Flow Image:"]');
+    const images = document.querySelectorAll('img[alt="Generated image"]');
     
     for (const img of images) {
       const src = (img as HTMLImageElement).src;
@@ -3215,177 +3298,33 @@ class ImageFlowController {
    * Step: Ensure we're in "Create Image" mode
    */
   async ensureCreateImageMode(): Promise<void> {
-    const config = this.stepConfig['ensureCreateImageMode'];
-
-    // Check if already in Create Image mode
-    const modeButton = document.querySelector('[role="combobox"]');
-    if (modeButton?.textContent?.includes('Create Image')) {
-      console.log('[ImageFlowController] Already in Create Image mode');
-      return;
+    // Use Main World to click Radix tabs (content script clicks don't register)
+    const result = await chrome.runtime.sendMessage({
+      action: 'CONFIGURE_FLOW_SETTINGS',
+      mode: 'image',
+    });
+    if (!result?.success) {
+      throw new Error(`Switch to image mode failed: ${result?.error || 'unknown'}`);
     }
-
-    // Click mode dropdown
-    const dropdown = Array.from(document.querySelectorAll('button, [role="combobox"]'))
-      .find(el => el.textContent?.includes('arrow_drop_down'));
-    if (!dropdown) throw new Error('Mode dropdown not found');
-    (dropdown as HTMLElement).click();
-
-    // Wait for listbox
-    await this.waitFor(
-      () => document.querySelector('[role="listbox"]') !== null,
-      'mode listbox',
-      config.timeoutMs
-    );
-    await this.delay(200);
-
-    // Click "Create Image" option
-    const option = Array.from(document.querySelectorAll('[role="option"]'))
-      .find(el => el.textContent?.includes('Create Image'));
-    if (!option) throw new Error('Create Image option not found');
-    (option as HTMLElement).click();
-
-    // Wait for mode change
-    await this.waitFor(
-      () => {
-        const current = document.querySelector('[role="combobox"]');
-        return current?.textContent?.includes('Create Image') ?? false;
-      },
-      'mode change to Create Image',
-      config.timeoutMs
-    );
-    await this.delay(300);
+    console.log('[ImageFlowController] Switched to Create Image mode via Main World');
+    await new Promise(r => setTimeout(r, 300));
   }
 
   /**
-   * Step: Configure settings (aspect ratio + output count)
+   * Step: Configure settings (aspect ratio + output count) via Radix config popper
    */
   async configureSettings(aspectRatio: '9:16' | '16:9', imageCount: number): Promise<void> {
-    const config = this.stepConfig['configureSettings'];
-    const isPortrait = aspectRatio === '9:16';
-    const targetText = isPortrait ? 'Portrait' : 'Landscape';
-
-    // Helper to get fresh dialog reference
-    const getDialog = () => document.querySelector('[role="dialog"]');
-    
-    // Helper to find combobox by label text
-    const findCombobox = (labelText: string): HTMLElement | null => {
-      const dialog = getDialog();
-      if (!dialog) return null;
-      const comboboxes = dialog.querySelectorAll('[role="combobox"]');
-      for (const cb of comboboxes) {
-        if (cb.textContent?.includes(labelText)) {
-          return cb as HTMLElement;
-        }
-      }
-      return null;
-    };
-
-    // Open settings dialog
-    const settingsBtn = findButtonByText('Settings');
-    if (!settingsBtn) throw new Error('Settings button not found');
-    console.log('[ImageFlowController] Clicking Settings button');
-    settingsBtn.click();
-
-    // Wait for dialog
-    await this.waitFor(
-      () => getDialog() !== null,
-      'settings dialog',
-      config.timeoutMs
-    );
-    await this.delay(500);
-    console.log('[ImageFlowController] Settings dialog opened');
-
-    // ===== Set Aspect Ratio =====
-    const aspectCombobox = findCombobox('Aspect Ratio');
-    if (aspectCombobox) {
-      // Check if already correct
-      if (!aspectCombobox.textContent?.includes(targetText)) {
-        console.log('[ImageFlowController] Clicking Aspect Ratio combobox');
-        aspectCombobox.click();
-        await this.delay(300);
-        
-        // Wait for options
-        await this.waitFor(
-          () => document.querySelectorAll('[role="option"]').length > 0,
-          'aspect ratio options',
-          config.timeoutMs
-        );
-        
-        const targetOption = Array.from(document.querySelectorAll('[role="option"]'))
-          .find(el => el.textContent?.includes(targetText));
-        if (targetOption) {
-          console.log('[ImageFlowController] Selecting aspect ratio:', targetText);
-          (targetOption as HTMLElement).click();
-          await this.delay(300);
-          
-          // Wait for dropdown to close
-          await this.waitFor(
-            () => document.querySelectorAll('[role="option"]').length === 0,
-            'aspect ratio dropdown close',
-            5000
-          );
-          await this.delay(200);
-        }
-      } else {
-        console.log('[ImageFlowController] Aspect ratio already set to:', targetText);
-      }
+    // Use Main World to click Radix tabs (content script clicks don't register)
+    const result = await chrome.runtime.sendMessage({
+      action: 'CONFIGURE_FLOW_SETTINGS',
+      aspectRatio,
+      imageCount,
+    });
+    if (!result?.success) {
+      throw new Error(`Configure settings failed: ${result?.error || 'unknown'}`);
     }
-
-    // ===== Set Output Count =====
-    const outputCombobox = findCombobox('Outputs per prompt');
-    if (outputCombobox) {
-      // Check if already correct
-      const currentCount = outputCombobox.textContent?.match(/\d+/)?.[0];
-      if (currentCount !== String(imageCount)) {
-        console.log('[ImageFlowController] Clicking Outputs per prompt combobox, current:', currentCount);
-        outputCombobox.click();
-        await this.delay(300);
-        
-        // Wait for options
-        await this.waitFor(
-          () => document.querySelectorAll('[role="option"]').length > 0,
-          'output count options',
-          config.timeoutMs
-        );
-        
-        const allOptions = document.querySelectorAll('[role="option"]');
-        console.log('[ImageFlowController] Found options:', allOptions.length);
-        
-        const countOption = Array.from(allOptions)
-          .find(el => el.textContent?.trim() === String(imageCount));
-        if (countOption) {
-          console.log('[ImageFlowController] Selecting output count:', imageCount);
-          (countOption as HTMLElement).click();
-          await this.delay(300);
-          
-          // Wait for dropdown to close
-          await this.waitFor(
-            () => document.querySelectorAll('[role="option"]').length === 0,
-            'output count dropdown close',
-            5000
-          );
-          await this.delay(200);
-        } else {
-          console.log('[ImageFlowController] Option not found for count:', imageCount);
-        }
-      } else {
-        console.log('[ImageFlowController] Output count already set to:', imageCount);
-      }
-    } else {
-      console.log('[ImageFlowController] Outputs per prompt combobox not found');
-    }
-
-    // Close dialog by clicking outside or pressing Escape
-    console.log('[ImageFlowController] Closing settings dialog');
-    const escEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-    document.dispatchEvent(escEvent);
-    
-    await this.waitFor(
-      () => document.querySelector('[role="dialog"]') === null,
-      'settings dialog close',
-      config.timeoutMs
-    );
-    await this.delay(200);
+    console.log('[ImageFlowController] Settings configured via Main World:', result.results);
+    await new Promise(r => setTimeout(r, 300));
   }
 
   // ─── "Add To Prompt" by UUID (for reference images already in gallery) ───
@@ -3402,7 +3341,7 @@ class ImageFlowController {
       const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
                             style.overflowY === 'auto' || style.overflowY === 'scroll';
       if (isScrollable && el.scrollHeight > el.clientHeight + 100 && (el as HTMLElement).clientHeight > 200) {
-        if (el.querySelectorAll('img[alt^="Flow Image:"]').length > 0) {
+        if (el.querySelectorAll('img[alt="Generated image"]').length > 0) {
           return el as HTMLElement;
         }
       }
@@ -3875,13 +3814,14 @@ class ImageFlowController {
   async fillPrompt(prompt: string): Promise<void> {
     const config = this.stepConfig['fillPrompt'];
 
-    const textbox = document.querySelector('textarea, input[type="text"]') as HTMLInputElement | HTMLTextAreaElement;
-    if (!textbox) throw new Error('Prompt textbox not found');
-
-    textbox.focus();
-    textbox.value = prompt;
-    textbox.dispatchEvent(new Event('input', { bubbles: true }));
-    textbox.dispatchEvent(new Event('change', { bubbles: true }));
+    // Slate editor lives in Main World — content script can't access its React state.
+    // Send to background.ts which uses chrome.scripting.executeScript({ world: 'MAIN' })
+    // to walk React fiber tree and call slateEditor.insertText() directly.
+    const result = await chrome.runtime.sendMessage({ action: 'SLATE_INSERT_TEXT', text: prompt });
+    if (!result?.success) {
+      throw new Error(`Slate insert failed: ${result?.error || 'unknown'}`);
+    }
+    await this.delay(500);
 
     // Wait for Create button to be enabled
     await this.waitFor(
@@ -4056,7 +3996,7 @@ class ImageFlowController {
   private getHighResUrl(originalUrl: string, targetWidth: number): string {
     // Don't modify signed Google Cloud Storage URLs - they have authentication
     // signatures that break when the URL is modified in any way
-    if (originalUrl.includes('GoogleAccessId') || originalUrl.includes('Signature=') || originalUrl.includes('storage.googleapis.com')) {
+    if (originalUrl.includes('GoogleAccessId') || originalUrl.includes('Signature=') || originalUrl.includes('storage.googleapis.com') || originalUrl.includes('getMediaUrlRedirect')) {
       console.log('[ImageFlowController] Using original signed URL (no modifications)');
       return originalUrl;
     }
@@ -4443,8 +4383,19 @@ class ImageFlowController {
     this.initialUUIDs = new Set(initialUUIDsList);
     console.log('[ImageFlowController] Initial UUIDs collected:', this.initialUUIDs.size);
 
-    await this.executeStep('ensureCreateImageMode', () => this.ensureCreateImageMode(), 0, totalScenes);
-    await this.executeStep('configureSettings', () => this.configureSettings(aspectRatio, imageCount), 0, totalScenes);
+    // Configure mode + settings via Main World (Radix tabs don't respond to content script clicks).
+    // background.ts runs the entire popper interaction in chrome.scripting.executeScript({ world: 'MAIN' }).
+    const result = await chrome.runtime.sendMessage({
+      action: 'CONFIGURE_FLOW_SETTINGS',
+      mode: 'image',
+      aspectRatio,
+      imageCount,
+    });
+    if (!result?.success) {
+      throw new Error(`Configure settings failed: ${result?.error || 'unknown'}`);
+    }
+    console.log('[ImageFlowController] Settings configured via Main World:', result.results);
+    await this.delay(500);
   }
 
   /**
@@ -5564,7 +5515,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ success: true, count: trackedCount, source: 'tracker' });
         } else {
           // Fallback: Count visible images (may be inaccurate with lazy loading)
-          const flowImages = document.querySelectorAll('img[alt^="Flow Image:"]');
+          const flowImages = document.querySelectorAll('img[alt="Generated image"]');
           console.log('[GET_IMAGE_COUNT] Found', flowImages.length, 'images (DOM only)');
           sendResponse({ success: true, count: flowImages.length, source: 'dom' });
         }
@@ -5679,7 +5630,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         console.log('[DOWNLOAD_NEW_IMAGES] Previous count:', previousCount, 'New images to download:', newImageCount);
 
         // Get all completed images
-        const allFlowImages = document.querySelectorAll('img[alt^="Flow Image:"]');
+        const allFlowImages = document.querySelectorAll('img[alt="Generated image"]');
         const totalImages = allFlowImages.length;
 
         console.log('[DOWNLOAD_NEW_IMAGES] Total images found:', totalImages);
