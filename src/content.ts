@@ -3398,50 +3398,23 @@ class ImageFlowController {
   async clickAddToPromptByImageUuid(imageUuid: string): Promise<void> {
     console.log(`[ImageFlowController] Adding image ${imageUuid.substring(0, 8)}... to prompt via gallery`);
 
-    // Ensure Images tab is active
-    const radios = document.querySelectorAll('button[role="radio"]');
-    for (const r of radios) {
-      if (r.textContent?.includes('Images')) {
-        (r as HTMLElement).click();
-        break;
-      }
-    }
-    await this.waitFor(
-      () => {
-        const active = document.querySelector('button[role="radio"][aria-checked="true"]');
-        return active?.textContent?.includes('Images') ?? false;
-      },
-      'Images tab active',
-      10000
-    );
-    await this.delay(500);
+    // Gallery now shows images directly — no tab switch needed
+    await this.delay(300);
 
     // Find the image by scrolling incrementally
     const img = await this.scrollToFindImageByUuid(imageUuid);
     if (!img) throw new Error(`Gallery image not found for UUID: ${imageUuid}`);
 
-    // Check if image is already added as ingredient (button shows "Remove From Prompt").
-    // Flow may auto-add the latest generated image as an ingredient.
-    const alreadyAdded = (() => {
-      let searchRoot: Element | null = img;
-      for (let i = 0; i < 4 && searchRoot; i++) {
-        searchRoot = searchRoot.parentElement;
-        if (searchRoot) {
-          const buttons = searchRoot.querySelectorAll('button');
-          for (const btn of buttons) {
-            if (btn.textContent?.includes('Remove From Prompt')) return true;
-          }
-        }
-      }
-      return false;
-    })();
-
+    // Check if image is already added as an ingredient.
+    // After clicking "Add to Prompt", an ingredient chip appears in the prompt bar
+    // with an img whose src contains the image UUID.
+    const alreadyAdded = !!document.querySelector(`button img[alt*="piece of media"][src*="${imageUuid}"]`);
     if (alreadyAdded) {
-      console.log(`[ImageFlowController] Image ${imageUuid.substring(0, 8)}... already added as ingredient (Remove From Prompt visible), skipping`);
+      console.log(`[ImageFlowController] Image ${imageUuid.substring(0, 8)}... already added as ingredient (chip in prompt bar), skipping`);
       return;
     }
 
-    // Hover over the image container to reveal overlay buttons
+    // Hover over the image container to reveal the toolbar with More button
     const hoverTargets: HTMLElement[] = [];
     let el: HTMLElement | null = img;
     for (let i = 0; i < 5 && el; i++) {
@@ -3452,59 +3425,110 @@ class ImageFlowController {
       target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
       target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
     }
+    await this.delay(300);
 
-    // Wait for "Add To Prompt" or "Remove From Prompt" button to appear near this image
-    let addBtn: HTMLButtonElement | null = null;
-    let alreadyIngredient = false;
-    await this.waitFor(
-      () => {
-        let searchRoot: Element | null = img;
-        for (let i = 0; i < 8 && searchRoot; i++) {
-          searchRoot = searchRoot.parentElement;
-          if (searchRoot) {
-            const buttons = searchRoot.querySelectorAll('button');
-            for (const btn of buttons) {
-              if (btn.textContent?.includes('Remove From Prompt')) {
-                alreadyIngredient = true;
-                return true;
-              }
-              if (btn.textContent?.includes('Add To Prompt')) {
-                addBtn = btn as HTMLButtonElement;
-                return true;
-              }
+    // Find the "More" button (more_vert) in the toolbar near this image.
+    // Walk up from img to the tile container, then find toolbar > button with "more_vert" icon.
+    let moreBtn: HTMLButtonElement | null = null;
+    let searchRoot: Element | null = img;
+    for (let i = 0; i < 6 && searchRoot; i++) {
+      searchRoot = searchRoot.parentElement;
+      if (searchRoot) {
+        const toolbar = searchRoot.querySelector('[role="toolbar"]');
+        if (toolbar) {
+          const buttons = toolbar.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (btn.textContent?.includes('more_vert')) {
+              moreBtn = btn as HTMLButtonElement;
+              break;
             }
           }
+          if (moreBtn) break;
         }
-        return false;
-      },
-      `Add To Prompt button for image ${imageUuid.substring(0, 8)}`,
-      10000
-    );
-
-    if (alreadyIngredient) {
-      console.log(`[ImageFlowController] Image ${imageUuid.substring(0, 8)}... already an ingredient, skipping click`);
-      return;
+      }
     }
 
-    if (!addBtn) throw new Error(`"Add To Prompt" button not found for image UUID: ${imageUuid}`);
-    addBtn.click();
+    if (!moreBtn) {
+      // Fallback: try finding any button near the image with more_vert text
+      searchRoot = img;
+      for (let i = 0; i < 8 && searchRoot; i++) {
+        searchRoot = searchRoot.parentElement;
+        if (searchRoot) {
+          const buttons = searchRoot.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (btn.textContent?.includes('more_vert') && btn.textContent?.includes('More')) {
+              moreBtn = btn as HTMLButtonElement;
+              break;
+            }
+          }
+          if (moreBtn) break;
+        }
+      }
+    }
 
-    // Wait for confirmation — button changes to "Remove From Prompt"
+    if (!moreBtn) throw new Error(`"More" button not found in toolbar for image UUID: ${imageUuid}`);
+
+    // Click the More button using full synthetic event sequence.
+    // Radix UI menus don't respond to .click() from content script isolated world.
+    const rect = moreBtn.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    const eventInit: PointerEventInit & MouseEventInit = {
+      bubbles: true, cancelable: true,
+      clientX: x, clientY: y, screenX: x, screenY: y,
+      view: window, button: 0, buttons: 1,
+    };
+    moreBtn.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerId: 1 }));
+    moreBtn.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerId: 1, bubbles: false }));
+    moreBtn.dispatchEvent(new MouseEvent('mouseover', eventInit));
+    moreBtn.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
+    moreBtn.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerId: 1 }));
+    moreBtn.dispatchEvent(new MouseEvent('mousedown', eventInit));
+    moreBtn.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerId: 1, buttons: 0 }));
+    moreBtn.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
+    moreBtn.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
+    console.log(`[ImageFlowController] Dispatched synthetic click on More button for image ${imageUuid.substring(0, 8)}...`);
+
+    // Wait for the menu to appear with "Add to Prompt" menuitem
+    let addMenuItem: HTMLElement | null = null;
     await this.waitFor(
       () => {
-        let searchRoot: Element | null = img;
-        for (let i = 0; i < 8 && searchRoot; i++) {
-          searchRoot = searchRoot.parentElement;
-          if (searchRoot) {
-            const buttons = searchRoot.querySelectorAll('button');
-            for (const btn of buttons) {
-              if (btn.textContent?.includes('Remove From Prompt')) return true;
-            }
+        const menuItems = document.querySelectorAll('[role="menuitem"]');
+        for (const item of menuItems) {
+          if (item.textContent?.includes('Add to Prompt')) {
+            addMenuItem = item as HTMLElement;
+            return true;
           }
         }
         return false;
       },
-      'ingredient added (Remove From Prompt visible)',
+      `"Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}`,
+      5000
+    );
+
+    if (!addMenuItem) throw new Error(`"Add to Prompt" menuitem not found for image UUID: ${imageUuid}`);
+
+    // Click the "Add to Prompt" menuitem using same synthetic event pattern
+    const miRect = (addMenuItem as HTMLElement).getBoundingClientRect();
+    const miX = miRect.x + miRect.width / 2;
+    const miY = miRect.y + miRect.height / 2;
+    const miInit: PointerEventInit & MouseEventInit = {
+      bubbles: true, cancelable: true,
+      clientX: miX, clientY: miY, screenX: miX, screenY: miY,
+      view: window, button: 0, buttons: 1,
+    };
+    (addMenuItem as HTMLElement).dispatchEvent(new PointerEvent('pointerdown', { ...miInit, pointerId: 1 }));
+    (addMenuItem as HTMLElement).dispatchEvent(new MouseEvent('mousedown', miInit));
+    (addMenuItem as HTMLElement).dispatchEvent(new PointerEvent('pointerup', { ...miInit, pointerId: 1, buttons: 0 }));
+    (addMenuItem as HTMLElement).dispatchEvent(new MouseEvent('mouseup', { ...miInit, buttons: 0 }));
+    (addMenuItem as HTMLElement).dispatchEvent(new MouseEvent('click', { ...miInit, buttons: 0 }));
+    console.log(`[ImageFlowController] Dispatched synthetic click on "Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}...`);
+    console.log(`[ImageFlowController] Clicked "Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}...`);
+
+    // Wait for confirmation — ingredient chip with matching UUID appears in the prompt bar
+    await this.waitFor(
+      () => !!document.querySelector(`button img[alt*="piece of media"][src*="${imageUuid}"]`),
+      `ingredient chip for image ${imageUuid.substring(0, 8)}`,
       10000
     );
     await this.delay(500);
