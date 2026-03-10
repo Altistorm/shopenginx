@@ -1424,8 +1424,6 @@ class VideoFlowController {
    * Step: Switch to Images tab in the gallery
    */
   async switchToImagesTab(): Promise<void> {
-    const config = this.stepConfig['switchToImagesTab'];
-
     // Check if already on Images tab (aria-checked="true")
     const alreadyActive = document.querySelector('button[role="radio"][aria-checked="true"]');
     if (alreadyActive?.textContent?.includes('Images')) {
@@ -1433,26 +1431,28 @@ class VideoFlowController {
       return;
     }
 
-    // Wait for Images radio to appear in the DOM
-    await this.waitFor(
-      () => findByText('[role="radio"]', 'Images') !== null,
-      'Images tab radio visible',
-      config.timeoutMs
-    );
-
+    // Check if Images radio exists at all — Flow UI may not have tabs in some views
     const imagesRadio = findByText('[role="radio"]', 'Images');
-    if (!imagesRadio) throw new Error('Images tab radio not found');
+    if (!imagesRadio) {
+      console.log('[VideoFlowController] Images tab radio not found, assuming images already visible');
+      return;
+    }
+
     imagesRadio.click();
 
-    // Wait for the tab to become active
-    await this.waitFor(
-      () => {
-        const active = document.querySelector('button[role="radio"][aria-checked="true"]');
-        return active?.textContent?.includes('Images') ?? false;
-      },
-      'Images tab active',
-      config.timeoutMs
-    );
+    // Wait for the tab to become active (short timeout — it's just a UI toggle)
+    try {
+      await this.waitFor(
+        () => {
+          const active = document.querySelector('button[role="radio"][aria-checked="true"]');
+          return active?.textContent?.includes('Images') ?? false;
+        },
+        'Images tab active',
+        5000
+      );
+    } catch {
+      console.log('[VideoFlowController] Images tab activation timed out, continuing anyway');
+    }
     await this.delay(500);
     console.log('[VideoFlowController] Switched to Images tab');
   }

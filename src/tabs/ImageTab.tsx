@@ -67,6 +67,7 @@ function ImageTab() {
   const [aiLoading, setAiLoading] = useState(false)
   const [aiLoadingIndex, setAiLoadingIndex] = useState<number | null>(null)
   const [isRunning, setIsRunning] = useState(false)
+  const [configCollapsed, setConfigCollapsed] = useState(false)
 
   const [validationError, setValidationError] = useState<string | null>(null)
   
@@ -307,6 +308,7 @@ function ImageTab() {
     }
 
     setIsRunning(true)
+    setConfigCollapsed(true)
 
     try {
       if (multiSetMode === 'story') {
@@ -881,6 +883,16 @@ function ImageTab() {
 
 
 
+      {/* Collapsible config toggle */}
+      <div
+        className="flex items-center justify-between cursor-pointer px-2 py-1.5 bg-base-200 rounded-lg hover:bg-base-300 transition-colors select-none"
+        onClick={() => setConfigCollapsed(!configCollapsed)}
+      >
+        <span className="text-xs font-medium text-base-content/60">⚙️ ตั้งค่า (สไตล์, สัดส่วน, Mood)</span>
+        <span className="text-[10px] text-base-content/40">{configCollapsed ? '▶' : '▼'}</span>
+      </div>
+
+      {!configCollapsed && (<>
       {/* Video Type (story mode only) */}
       {multiSetMode === 'story' && (
         <div className="form-control">
@@ -1034,10 +1046,11 @@ function ImageTab() {
           </select>
         </div>
       </div>
-
+      </>)}
       {/* Story mode settings + prompts */}
       {multiSetMode === 'story' && (
         <div className="space-y-2">
+          {!configCollapsed && (<>
           {/* Mood + Scene count row */}
           <div className="grid grid-cols-2 gap-2">
             <div className="form-control">
@@ -1110,6 +1123,7 @@ function ImageTab() {
               </select>
             </div>
           </div>
+          </>)}
 
           {/* Auto wording + AI generate all */}
           <div className="flex items-center gap-2">
@@ -1310,6 +1324,24 @@ function ImageTab() {
             onChange={(e) => setBulkUsePreviewGrid(e.target.checked)}
           />
           <span className="text-xs">ใช้ Storyboard Preview เป็น Reference (แทน Scene 1)</span>
+        </label>
+      )}
+
+      {/* Auto generate video toggle — story mode only */}
+      {multiSetMode === 'story' && (
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 bg-base-200 rounded-lg">
+          <input
+            type="checkbox"
+            className="toggle toggle-sm toggle-accent"
+            checked={autoGenerateVideo}
+            onChange={(e) => setAutoGenerateVideo(e.target.checked)}
+          />
+          <div className="flex flex-col">
+            <span className="text-xs">🎬 สร้างวิดีโออัตโนมัติหลังสร้างภาพเสร็จ</span>
+            {autoGenerateVideo && (
+              <span className="text-[10px] text-base-content/50">Phase 1: ภาพ → Phase 2: End Frame → Phase 3: วิดีโอ</span>
+            )}
+          </div>
         </label>
       )}
 
