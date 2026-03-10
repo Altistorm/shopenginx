@@ -4428,32 +4428,37 @@ class ImageFlowController {
    */
   private async captureGeneratedImage(uuid: string): Promise<string | null> {
     try {
-      // Find the image element by UUID (same approach as downloadImages)
+      console.log(`[captureGeneratedImage] Looking for img[src*="${uuid}"]`);
       let img = document.querySelector(`img[src*="${uuid}"]`) as HTMLImageElement;
       if (!img && uuid.length > 8) {
+        console.log(`[captureGeneratedImage] Full UUID not found, trying short: ${uuid.substring(0, 8)}`);
         img = document.querySelector(`img[src*="${uuid.substring(0, 8)}"]`) as HTMLImageElement;
       }
       if (!img) {
-        console.log(`[ImageFlowController] captureGeneratedImage: image not found for UUID ${uuid}`);
+        // Log all img[alt="Generated image"] srcs to help debug
+        const allImgs = document.querySelectorAll('img[alt="Generated image"]');
+        console.warn(`[captureGeneratedImage] NOT FOUND. UUID: ${uuid}. Total Generated images in DOM: ${allImgs.length}`);
+        allImgs.forEach((el, i) => console.log(`  [${i}] src: ${(el as HTMLImageElement).src?.substring(0, 100)}`));
         return null;
       }
 
-      // Use 1K resolution for reference (sufficient for character consistency, keeps payload small)
+      console.log(`[captureGeneratedImage] Found img, src: ${img.src?.substring(0, 100)}`);
       const imageUrl = this.getHighResUrl(img.src, 1024);
-      console.log(`[ImageFlowController] captureGeneratedImage: fetching ${imageUrl.substring(0, 80)}...`);
+      console.log(`[captureGeneratedImage] Fetching: ${imageUrl.substring(0, 120)}`);
 
       const response = await fetch(imageUrl);
       if (!response.ok) {
-        console.error(`[ImageFlowController] captureGeneratedImage: fetch failed ${response.status}`);
+        console.error(`[captureGeneratedImage] Fetch failed: ${response.status} ${response.statusText}`);
         return null;
       }
 
       const blob = await response.blob();
+      console.log(`[captureGeneratedImage] Blob size: ${blob.size} bytes, type: ${blob.type}`);
       const dataUrl = await this.blobToDataUrl(blob);
-      console.log(`[ImageFlowController] captureGeneratedImage: captured (${Math.round(dataUrl.length / 1024)}KB)`);
+      console.log(`[captureGeneratedImage] Success: ${Math.round(dataUrl.length / 1024)}KB`);
       return dataUrl;
     } catch (error) {
-      console.error('[ImageFlowController] captureGeneratedImage error:', error);
+      console.error('[captureGeneratedImage] Exception:', error);
       return null;
     }
   }
@@ -4516,17 +4521,20 @@ class ImageFlowController {
       // Track new UUIDs
       newUUIDs.forEach(uuid => this.initialUUIDs.add(uuid));
 
-      // Capture scene 1's image for auto-character reference
+      // Capture generated image as base64 (for thumbnail + auto-character reference)
       let imageBase64: string | undefined;
+      console.log('[ImageFlowController] captureImage flag:', captureImage, ', newUUIDs:', newUUIDs.length, newUUIDs);
       if (captureImage && newUUIDs.length > 0) {
-        console.log('[ImageFlowController] Capturing scene 1 image for character reference...');
+        console.log(`[ImageFlowController] Attempting captureGeneratedImage for UUID: ${newUUIDs[0]}`);
         const captured = await this.captureGeneratedImage(newUUIDs[0]);
+        console.log(`[ImageFlowController] captureGeneratedImage result: ${captured ? `${Math.round(captured.length / 1024)}KB` : 'null'}`);
         if (captured) {
           imageBase64 = captured;
-          console.log('[ImageFlowController] Scene 1 image captured successfully');
         } else {
-          console.warn('[ImageFlowController] Failed to capture scene 1 image — scenes 2+ will not have auto-reference');
+          console.warn('[ImageFlowController] captureGeneratedImage returned null — thumbnail will be missing');
         }
+      } else {
+        console.log(`[ImageFlowController] Skipping capture: captureImage=${captureImage}, newUUIDs.length=${newUUIDs.length}`);
       }
 
       // Download if enabled

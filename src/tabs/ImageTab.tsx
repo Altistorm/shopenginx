@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, VIDEO_TYPE_GROUPS, IMAGE_STYLES } from '../storyPrompts'
 import { useVideoWorkflow, type SceneData } from '../hooks/useVideoWorkflow'
+import { useStoryWorkflow } from '../hooks/useStoryWorkflow'
 import StoryboardPanel from '../components/StoryboardPanel'
 import {
   type WorkflowCheckpoint,
@@ -50,7 +51,7 @@ function ImageTab() {
   const [downloadResolution, setDownloadResolution] = useState<'1K' | '2K' | '4K'>('1K')
   const [autoGenerateVideo, setAutoGenerateVideo] = useState(false)
   const [videoExtensionMode, setVideoExtensionMode] = useState(false)
-  const [scenes, setScenes] = useState<SceneData[]>([])
+  const [bulkUsePreviewGrid, setBulkUsePreviewGrid] = useState(true)
   const [imageText, setImageText] = useState('')
   const [scene, setScene] = useState('')
   const [referenceStyle, setReferenceStyle] = useState('pixar_3d')
@@ -63,14 +64,9 @@ function ImageTab() {
   const [storyTitle, setStoryTitle] = useState('')
   const [storyCharacters, setStoryCharacters] = useState<StoryCharacter[]>([])
   const [storyboardPrompt, setStoryboardPrompt] = useState('')
-  const [storyboardPreviewImage, setStoryboardPreviewImage] = useState<string | null>(null)
-  const [storyboardPreviewUuid, setStoryboardPreviewUuid] = useState<string | null>(null)
-  const [generatingPreview, setGeneratingPreview] = useState(false)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiLoadingIndex, setAiLoadingIndex] = useState<number | null>(null)
   const [isRunning, setIsRunning] = useState(false)
-  const [generatingImage, setGeneratingImage] = useState<string | null>(null)
-  const [generatingVideo, setGeneratingVideo] = useState<string | null>(null)
 
   const [validationError, setValidationError] = useState<string | null>(null)
   
@@ -79,8 +75,6 @@ function ImageTab() {
   const [result, setResult] = useState<{ success: boolean; error?: string; completedSets?: number; totalSets?: number } | null>(null)
 
   // Story mode progress (sidebar-controlled)
-  const [storyCurrentScene, setStoryCurrentScene] = useState<number | null>(null)
-  const [storyTotalScenes, setStoryTotalScenes] = useState(0)
   const [showCharacterModal, setShowCharacterModal] = useState(false)
 
   // Shared video workflow hook (for auto-generate video)
@@ -91,13 +85,15 @@ function ImageTab() {
     imageStatuses: videoImageStatuses,
   } = useVideoWorkflow()
 
+  // ── Refs for cross-hook checkpoint communication ──
+  const scenesRef = useRef<SceneData[]>([])
+  const storyboardPreviewUuidRef = useRef<string | null>(null)
+
   // ── Checkpoint & Resume state ──
   const [pendingCheckpoint, setPendingCheckpoint] = useState<WorkflowCheckpoint | null>(null)
   const [showResumeBanner, setShowResumeBanner] = useState(false)
   const [showExportModal, setShowExportModal] = useState(false)
   const [exportIncludeImages, setExportIncludeImages] = useState(false)
-  const scenesRef = useRef(scenes)
-  scenesRef.current = scenes
   const [showJsonModal, setShowJsonModal] = useState(false)
 
   // ── Checkpoint: collect current state into serializable object ──
@@ -105,13 +101,13 @@ function ImageTab() {
     const config: WorkflowConfig = {
       style, aspectRatio, imageCount, noTextOnImage, autoSaveImage,
       downloadResolution, downloadToFolder, autoGenerateVideo, videoExtensionMode,
-      referenceStyle, storyMood, videoType, storySceneCount, storyTopic, productName, scene,
+      referenceStyle, storyMood, videoType, storySceneCount, storyTopic, productName, scene, bulkUsePreviewGrid,
     }
     const story: WorkflowStory = {
       title: storyTitle,
       characters: storyCharacters,
       storyboardPrompt,
-      storyboardPreviewUuid,
+      storyboardPreviewUuid: storyboardPreviewUuidRef.current,
     }
     return {
       version: 1,
@@ -124,9 +120,49 @@ function ImageTab() {
   }, [
     style, aspectRatio, imageCount, noTextOnImage, autoSaveImage,
     downloadResolution, downloadToFolder, autoGenerateVideo, videoExtensionMode,
-    referenceStyle, storyMood, videoType, storySceneCount, storyTopic, productName, scene,
-    storyTitle, storyCharacters, storyboardPrompt, storyboardPreviewUuid, pendingCheckpoint,
+    referenceStyle, storyMood, videoType, storySceneCount, storyTopic, productName, scene, bulkUsePreviewGrid,
+    storyTitle, storyCharacters, storyboardPrompt, pendingCheckpoint,
   ])
+
+  // ── Checkpoint: save current state to chrome.storage.local ──
+  const saveCurrentCheckpoint = useCallback(async (freshScenes?: SceneData[]) => {
+    try {
+      const cp = collectCheckpoint()
+      // Use fresh scenes from hook if provided (avoids stale React state)
+      if (freshScenes) {
+        cp.scenes = freshScenes
+      }
+      await saveToStorage(cp)
+    } catch (err) {
+      console.warn('[Checkpoint] Save failed:', err)
+    }
+  }, [collectCheckpoint])
+
+  // ── Story workflow hook (scenes, image/video generation, preview) ──
+  const {
+    scenes, setScenes,
+    storyboardPreviewImage, setStoryboardPreviewImage,
+    storyboardPreviewUuid, setStoryboardPreviewUuid,
+    generatingImage, generatingVideo, generatingPreview,
+    storyCurrentScene, storyTotalScenes,
+    createImage, generateVideo, generatePreview, runAll,
+  } = useStoryWorkflow(
+    {
+      style, aspectRatio, imageCount, autoSaveImage,
+      downloadResolution, downloadToFolder, autoGenerateVideo,
+      videoExtensionMode, bulkUsePreviewGrid,
+    },
+    {
+      storyCharacters,
+      startVideo,
+      onCheckpoint: saveCurrentCheckpoint,
+      onError: (msg) => setValidationError(msg),
+    }
+  )
+
+  // Update refs after hook call (for checkpoint reads)
+  scenesRef.current = scenes
+  storyboardPreviewUuidRef.current = storyboardPreviewUuid
 
   // ── Checkpoint: restore all state from a checkpoint ──
   const restoreCheckpoint = useCallback((cp: WorkflowCheckpoint) => {
@@ -147,27 +183,24 @@ function ImageTab() {
     setStoryTopic(cp.config.storyTopic)
     setProductName(cp.config.productName)
     setScene(cp.config.scene)
+    setBulkUsePreviewGrid(cp.config.bulkUsePreviewGrid ?? true)
     // Story
     setStoryTitle(cp.story.title)
     setStoryCharacters(cp.story.characters)
     setStoryboardPrompt(cp.story.storyboardPrompt)
     setStoryboardPreviewUuid(cp.story.storyboardPreviewUuid ?? null)
-    // Scenes (with progress flags)
-    setScenes(cp.scenes)
+    // Reconstruct image URLs from UUIDs since base64 is stripped on save
+    const IMAGE_URL_PREFIX = 'https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name='
+    setStoryboardPreviewImage(cp.story.storyboardPreviewUuid ? `${IMAGE_URL_PREFIX}${cp.story.storyboardPreviewUuid}` : null)
+    setScenes(cp.scenes.map(s => ({
+      ...s,
+      startFrameImage: s.startFrameImage ?? (s.startFrameImageUuid ? `${IMAGE_URL_PREFIX}${s.startFrameImageUuid}` : undefined),
+      endFrameImage: s.endFrameImage ?? (s.endFrameImageUuid ? `${IMAGE_URL_PREFIX}${s.endFrameImageUuid}` : undefined),
+    })))
     // Ensure story mode is selected
     setMultiSetMode('story')
     setPendingCheckpoint(cp)
-  }, [])
-
-  // ── Checkpoint: save current state to chrome.storage.local ──
-  const saveCurrentCheckpoint = useCallback(async () => {
-    try {
-      const cp = collectCheckpoint()
-      await saveToStorage(cp)
-    } catch (err) {
-      console.warn('[Checkpoint] Save failed:', err)
-    }
-  }, [collectCheckpoint])
+  }, [setStoryboardPreviewUuid, setScenes])
 
   // ── Checkpoint: load on mount ──
   useEffect(() => {
@@ -277,251 +310,21 @@ function ImageTab() {
 
     try {
       if (multiSetMode === 'story') {
-        // ==================== Story Mode — Sidebar-Controlled (with Checkpoint) ====================
-        const validScenes = scenes.filter(s => s.startFramePrompt.trim())
-        const total = validScenes.length
-
-        console.log(`[handleCreate] Story mode: ${total} scenes, sidebar-controlled`)
-        setStoryTotalScenes(total)
-
-        // 💾 SAVE #0: Initial checkpoint (marks workflow started)
-        await saveCurrentCheckpoint()
-
-        const initResp = await chrome.tabs.sendMessage(tab.id!, {
-          type: 'INIT_STORY_MODE',
-          aspectRatio,
-          imageCount,
-          totalScenes: total,
-        })
-
-        if (!initResp?.success) {
-          setValidationError(`Init failed: ${initResp?.error || 'Unknown error'}`)
-          setIsRunning(false)
-          return
-        }
-
-        let charRefText = ''
-        if (storyCharacters.length > 0) {
-          const charDesc = storyCharacters.map(c => `${c.name}: ${c.appearance}`).join('; ')
-          charRefText = `\n\n[Character Reference: ${charDesc}]`
-        }
-
-        const ingredientInstruction = `\n\n[IMPORTANT: The ingredient image is ONLY a reference for character appearance and art style/tone consistency. Do NOT copy its background, composition, camera angle, or pose. Generate a completely NEW scene with a DIFFERENT background and setting as described in this prompt. Match the characters and visual tone only.]`
-
-        let completedScenes = 0
-        let autoCharRefUuid: string | null = null
-        let autoCharRef: string | null = null
-
-        // Restore charRef from scene 0 if resuming (scene 0 already completed)
-        const scene0 = validScenes[0]
-        if (scene0?.imageCreated) {
-          if (scene0.startFrameImageUuid) autoCharRefUuid = scene0.startFrameImageUuid
-          if (scene0.startFrameImage) autoCharRef = scene0.startFrameImage
-        }
-
-        // ── PHASE 1: Start Frame Loop ──
-        for (let i = 0; i < total; i++) {
-          setStoryCurrentScene(i + 1)
-          const currentScene = validScenes[i]
-
-          // Skip if already completed (resume logic)
-          if (currentScene.imageCreated) {
-            completedScenes++
-            console.log(`[handleCreate] Scene ${i + 1}/${total}: start frame already done, skipping`)
-            continue
-          }
-
-          const shouldCapture = i === 0 || autoGenerateVideo
-
-          const sceneResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
-            await chrome.tabs.sendMessage(tab.id!, {
-              type: 'CREATE_STORY_SCENE',
-              prompt: currentScene.startFramePrompt + charRefText + (i > 0 ? ingredientInstruction : ''),
-              sceneIndex: i,
-              totalScenes: total,
-              imageCount,
-              autoSaveImage,
-              downloadResolution,
-              isLast: !autoGenerateVideo && i === total - 1,
-              referenceImageUuid: i > 0 ? autoCharRefUuid : undefined,
-              referenceImage: i > 0 && !autoCharRefUuid ? autoCharRef : undefined,
-              captureImage: shouldCapture,
-            })
-
-          console.log(`[handleCreate] Scene ${i + 1}/${total} result:`, sceneResp)
-
-          if (sceneResp?.success) {
-            completedScenes++
-            if (i === 0 && sceneResp.imageUUIDs?.[0]) {
-              autoCharRefUuid = sceneResp.imageUUIDs[0]
-            }
-            if (i === 0 && sceneResp.imageBase64) {
-              autoCharRef = sceneResp.imageBase64
-            }
-
-            // Update scene with runtime data
-            setScenes(prev => prev.map(s =>
-              s.sceneIndex === currentScene.sceneIndex
-                ? {
-                    ...s,
-                    startFrameImage: sceneResp.imageBase64,
-                    startFrameImageUuid: sceneResp.imageUUIDs?.[0],
-                    imageCreated: true,
-                  }
-                : s
-            ))
-          }
-
-          // 💾 SAVE after every start frame attempt
-          await saveCurrentCheckpoint()
-        }
-
-        setStoryCurrentScene(null)
-
-        // ── PHASE 2: End Frame Loop ──
-        const scenesWithEndFrame = validScenes.filter(s => s.endFramePrompt.trim())
-        if (scenesWithEndFrame.length > 0) {
-          const endInitResp = await chrome.tabs.sendMessage(tab.id!, {
-            type: 'INIT_STORY_MODE',
-            aspectRatio,
-            imageCount,
-            totalScenes: scenesWithEndFrame.length,
-          })
-
-          if (endInitResp?.success) {
-            for (let i = 0; i < scenesWithEndFrame.length; i++) {
-              setStoryCurrentScene(i + 1)
-              const currentScene = scenesWithEndFrame[i]
-
-              // Skip if already completed (resume logic)
-              if (currentScene.endFrameCreated) {
-                console.log(`[handleCreate] Scene ${currentScene.sceneIndex + 1}: end frame already done, skipping`)
-                continue
-              }
-
-              const endResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
-                await chrome.tabs.sendMessage(tab.id!, {
-                  type: 'CREATE_STORY_SCENE',
-                  prompt: currentScene.endFramePrompt + charRefText + (currentScene.sceneIndex > 0 ? ingredientInstruction : ''),
-                  sceneIndex: i,
-                  totalScenes: scenesWithEndFrame.length,
-                  imageCount,
-                  autoSaveImage,
-                  downloadResolution,
-                  isLast: i === scenesWithEndFrame.length - 1,
-                  referenceImageUuid: autoCharRefUuid || undefined,
-                  referenceImage: !autoCharRefUuid ? autoCharRef : undefined,
-                  captureImage: false,
-                })
-
-              if (endResp?.success) {
-                setScenes(prev => prev.map(s =>
-                  s.sceneIndex === currentScene.sceneIndex
-                    ? {
-                        ...s,
-                        endFrameImage: endResp.imageBase64,
-                        endFrameImageUuid: endResp.imageUUIDs?.[0],
-                        endFrameCreated: true,
-                      }
-                    : s
-                ))
-              }
-
-              // 💾 SAVE after every end frame attempt
-              await saveCurrentCheckpoint()
-            }
-            setStoryCurrentScene(null)
-          }
-        }
-
-        // ── PHASE 3: Auto-generate videos if enabled ──
-        let completedVideos = 0
-        let videoTotal = 0
-        if (autoGenerateVideo) {
-          // Only generate videos for scenes with completed start frames and no video yet
-          const scenesForVideo = validScenes.filter(s => s.imageCreated && !s.videoCreated)
-          if (scenesForVideo.length > 0) {
-            const hasUuids = !!autoCharRefUuid
-
-            const videoJobs = videoExtensionMode
-              ? [{
-                  image: hasUuids ? null : autoCharRef,
-                  imageUuid: autoCharRefUuid || undefined,
-                  prompts: scenesForVideo.map(s => {
-                    const vp = s.videoPrompt.trim() || s.startFramePrompt
-                    return s.script ? `${vp}\n\nScript: "${s.script}"` : vp
-                  }),
-                }]
-              : scenesForVideo.map((s, idx) => {
-                  const vp = s.videoPrompt.trim() || s.startFramePrompt
-                  const fullPrompt = s.script ? `${vp}\n\nScript: "${s.script}"` : vp
-                  return {
-                    image: hasUuids ? null : (idx === 0 ? autoCharRef : null),
-                    imageUuid: idx === 0 ? autoCharRefUuid || undefined : undefined,
-                    prompts: [fullPrompt],
-                  }
-                })
-
-            console.log(`[handleCreate] Video generation: ${videoExtensionMode ? 'extension' : 'separate'} mode, ${videoJobs.length} job(s)`)
-
-            const videoResult = await startVideo(videoJobs, {
-              aspectRatio,
-              videoCount: 1,
-              autoDownload: autoSaveImage,
-              downloadToFolder,
-              continueFromCurrent: hasUuids,
-              scenePromptsInOrder: !videoExtensionMode ? videoJobs.map(j => j.prompts[0]) : undefined,
-              // 💾 Checkpoint callback: mark scene videoCreated + save after each video job
-              onJobComplete: async (jobIndex: number, success: boolean) => {
-                if (success && !videoExtensionMode) {
-                  // In separate mode, each job = one scene
-                  const targetScene = scenesForVideo[jobIndex]
-                  if (targetScene) {
-                    setScenes(prev => prev.map(s =>
-                      s.sceneIndex === targetScene.sceneIndex
-                        ? { ...s, videoCreated: true }
-                        : s
-                    ))
-                  }
-                }
-                await saveCurrentCheckpoint()
-              },
-            })
-
-            completedVideos = videoResult.completedCount
-            videoTotal = videoResult.totalCount
-
-            // In extension mode, mark all scenes as videoCreated on full success
-            if (videoExtensionMode && videoResult.success) {
-              setScenes(prev => prev.map(s => {
-                const isTarget = scenesForVideo.some(sv => sv.sceneIndex === s.sceneIndex)
-                return isTarget ? { ...s, videoCreated: true } : s
-              }))
-            }
-          }
-
-          // 💾 SAVE after video phase
-          await saveCurrentCheckpoint()
-        }
-
-        const allDone = completedScenes === total && (!autoGenerateVideo || completedVideos === videoTotal)
+        // ==================== Story Mode — delegate to workflow hook ====================
+        const runResult = await runAll()
 
         // Clear checkpoint on full success
-        if (allDone) {
+        if (runResult.success) {
           await clearFromStorage()
           setPendingCheckpoint(null)
           setShowResumeBanner(false)
         }
 
         setResult({
-          success: allDone,
-          completedSets: completedScenes,
-          totalSets: total,
-          error: completedScenes < total
-            ? `สร้างได้ ${completedScenes}/${total} ภาพ`
-            : autoGenerateVideo && completedVideos < videoTotal
-              ? `ภาพครบ ${total}/${total} | วิดีโอ ${completedVideos}/${videoTotal}`
-              : undefined,
+          success: runResult.success,
+          completedSets: runResult.completedScenes,
+          totalSets: runResult.totalScenes,
+          error: runResult.error,
         })
 
       } else if (multiSetMode === 'sameModel' && sharedModelImage) {
@@ -711,62 +514,6 @@ function ImageTab() {
     }
   }
 
-  // Generate storyboard preview grid image
-  const handleGenerateStoryboardPreview = async () => {
-    if (!storyboardPrompt.trim()) {
-      setValidationError('กรุณาสร้าง Storyboard ด้วย AI ก่อน (ต้องมี storyboardPrompt)')
-      return
-    }
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
-      setValidationError('กรุณาเปิด Google Flow ก่อน (labs.google/fx/tools/flow)')
-      return
-    }
-
-    setGeneratingPreview(true)
-    setValidationError(null)
-
-    try {
-      // Init story mode for single preview generation
-      const initResp = await chrome.tabs.sendMessage(tab.id!, {
-        type: 'INIT_STORY_MODE',
-        aspectRatio,
-        imageCount: 1,
-        totalScenes: 1,
-      })
-
-      if (!initResp?.success) {
-        setValidationError(`Init failed: ${initResp?.error || 'Unknown error'}`)
-        return
-      }
-
-      // Generate the storyboard grid using storyboardPrompt
-      const resp: { success?: boolean; imageBase64?: string; imageUUIDs?: string[] } =
-        await chrome.tabs.sendMessage(tab.id!, {
-          type: 'CREATE_STORY_SCENE',
-          prompt: storyboardPrompt,
-          sceneIndex: 0,
-          totalScenes: 1,
-          imageCount: 1,
-          autoSaveImage,
-          downloadResolution,
-          isLast: true,
-          captureImage: true,
-        })
-
-      if (resp?.success) {
-        setStoryboardPreviewImage(resp.imageBase64 || null)
-        setStoryboardPreviewUuid(resp.imageUUIDs?.[0] || null)
-      } else {
-        setValidationError('Storyboard preview generation failed')
-      }
-    } catch (err) {
-      setValidationError((err as Error).message)
-    } finally {
-      setGeneratingPreview(false)
-    }
-  }
 
   // AI: Generate single prompt
   const handleGenerateSingle = async (index: number) => {
@@ -797,161 +544,6 @@ function ImageTab() {
     }
   }
 
-  // Per-scene image generation (start frame or end frame)
-  const handleGenerateSceneImage = async (sceneIndex: number, type: 'start' | 'end') => {
-    const sceneItem = scenes.find(s => s.sceneIndex === sceneIndex)
-    if (!sceneItem) return
-
-    const prompt = type === 'start' ? sceneItem.startFramePrompt : sceneItem.endFramePrompt
-    if (!prompt.trim()) {
-      setValidationError(`กรุณาใส่ ${type === 'start' ? 'Start Frame' : 'End Frame'} Prompt ก่อน`)
-      return
-    }
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
-      setValidationError('กรุณาเปิด Google Flow ก่อน (labs.google/fx/tools/flow)')
-      return
-    }
-
-    setGeneratingImage(`${type}-${sceneIndex}`)
-    setValidationError(null)
-
-    try {
-      // Determine reference mode: storyboard preview grid vs scene 0
-      const hasPreviewGrid = !!storyboardPreviewImage || !!storyboardPreviewUuid
-      let finalPrompt: string
-      let refUuid: string | undefined
-      let refImage: string | undefined
-
-      if (hasPreviewGrid) {
-        // GRID MODE: use storyboard preview as reference + "find SCENE N" prompt
-        const sceneNum = sceneIndex + 1
-        const styleDesc = IMAGE_STYLES[style]?.split(',')[0] || 'Pixar 3D'
-        finalPrompt = `${styleDesc} style.\n\nThe attached image is a STORYBOARD with multiple scene panels.\nFind and recreate SCENE ${sceneNum} as a single full-frame image.\n\nSCENE ${sceneNum} DESCRIPTION:\n${prompt}\n\nINSTRUCTIONS:\n- Look for the panel labeled "SCENE ${sceneNum}" in the storyboard grid\n- Recreate ONLY that specific panel as a full detailed image\n- Match exactly: character design, pose, expression, background from that panel\n- Output: ONE full image, no grid, no panels, no text labels\n- Single continuous image only, no collage, no multiple frames\n- Fill the ENTIRE frame edge-to-edge, NO black bars, NO letterboxing\n- Do NOT include aspect ratio`
-        refUuid = storyboardPreviewUuid || undefined
-        refImage = !refUuid ? (storyboardPreviewImage || undefined) : undefined
-      } else {
-        // FALLBACK: use scene 0 as character reference (original behavior)
-        let charRefText = ''
-        if (storyCharacters.length > 0) {
-          const charDesc = storyCharacters.map(c => `${c.name}: ${c.appearance}`).join('; ')
-          charRefText = `\n\n[Character Reference: ${charDesc}]`
-        }
-        const ingredientInstruction = sceneIndex > 0
-          ? `\n\n[IMPORTANT: The ingredient image is ONLY a reference for character appearance and art style/tone consistency. Do NOT copy its background, composition, camera angle, or pose. Generate a completely NEW scene with a DIFFERENT background and setting as described in this prompt. Match the characters and visual tone only.]`
-          : ''
-        finalPrompt = prompt + charRefText + ingredientInstruction
-        const scene0 = scenes.find(s => s.sceneIndex === 0)
-        refUuid = sceneIndex > 0 ? scene0?.startFrameImageUuid : undefined
-        refImage = sceneIndex > 0 && !refUuid ? scene0?.startFrameImage : undefined
-      }
-
-      // Init story mode for single scene generation
-      const initResp = await chrome.tabs.sendMessage(tab.id!, {
-        type: 'INIT_STORY_MODE',
-        aspectRatio,
-        imageCount,
-        totalScenes: 1,
-      })
-
-      if (!initResp?.success) {
-        setValidationError(`Init failed: ${initResp?.error || 'Unknown error'}`)
-        return
-      }
-
-      // Generate the single scene image
-      const sceneResp: { success?: boolean; imagesCreated?: number; error?: string; imageBase64?: string; imageUUIDs?: string[] } =
-        await chrome.tabs.sendMessage(tab.id!, {
-          type: 'CREATE_STORY_SCENE',
-          prompt: finalPrompt,
-          sceneIndex: 0,
-          totalScenes: 1,
-          imageCount,
-          autoSaveImage,
-          downloadResolution,
-          isLast: true,
-          referenceImageUuid: refUuid,
-          referenceImage: refImage,
-          captureImage: true,
-        })
-
-      if (sceneResp?.success) {
-        setScenes(prev => prev.map(s =>
-          s.sceneIndex === sceneIndex
-            ? {
-                ...s,
-                ...(type === 'start'
-                  ? {
-                      startFrameImage: sceneResp.imageBase64,
-                      startFrameImageUuid: sceneResp.imageUUIDs?.[0],
-                      imageCreated: true,
-                    }
-                  : {
-                      endFrameImage: sceneResp.imageBase64,
-                      endFrameImageUuid: sceneResp.imageUUIDs?.[0],
-                      endFrameCreated: true,
-                    }
-                ),
-              }
-            : s
-        ))
-      } else {
-        setValidationError(`Scene ${sceneIndex + 1} ${type} frame failed: ${sceneResp?.error || 'Unknown error'}`)
-      }
-    } catch (err) {
-      setValidationError((err as Error).message)
-    } finally {
-      setGeneratingImage(null)
-    }
-  }
-
-  // Per-scene video generation
-  const handleGenerateSceneVideo = async (sceneIndex: number) => {
-    const sceneItem = scenes.find(s => s.sceneIndex === sceneIndex)
-    if (!sceneItem) return
-
-    if (!sceneItem.startFrameImageUuid && !sceneItem.startFrameImage) {
-      setValidationError('กรุณาสร้าง Start Frame ก่อนสร้างวิดีโอ')
-      return
-    }
-
-    setGeneratingVideo(`video-${sceneIndex}`)
-    setValidationError(null)
-
-    try {
-      const vp = sceneItem.videoPrompt.trim() || sceneItem.startFramePrompt
-      const fullPrompt = sceneItem.script ? `${vp}\n\nScript: "${sceneItem.script}"` : vp
-
-      const job = {
-        image: sceneItem.startFrameImageUuid ? null : (sceneItem.startFrameImage || null),
-        imageUuid: sceneItem.startFrameImageUuid,
-        prompts: [fullPrompt],
-      }
-
-      const videoResult = await startVideo([job], {
-        aspectRatio,
-        videoCount: 1,
-        autoDownload: autoSaveImage,
-        downloadToFolder,
-        continueFromCurrent: !!sceneItem.startFrameImageUuid,
-      })
-
-      if (videoResult.success) {
-        setScenes(prev => prev.map(s =>
-          s.sceneIndex === sceneIndex
-            ? { ...s, videoCreated: true }
-            : s
-        ))
-      } else {
-        setValidationError(`Video generation failed: ${videoResult.error || 'Unknown error'}`)
-      }
-    } catch (err) {
-      setValidationError((err as Error).message)
-    } finally {
-      setGeneratingVideo(null)
-    }
-  }
 
   return (
     <div className="space-y-2">
@@ -1618,10 +1210,10 @@ function ImageTab() {
             scenes={scenes}
             onScenesChange={setScenes}
             onGenerateSingle={handleGenerateSingle}
-            onGenerateImage={handleGenerateSceneImage}
-            onGenerateVideo={handleGenerateSceneVideo}
+            onGenerateImage={createImage}
+            onGenerateVideo={generateVideo}
             onAddToScene={() => {}}
-            onGeneratePreview={handleGenerateStoryboardPreview}
+            onGeneratePreview={() => generatePreview(storyboardPrompt)}
             storyboardPreviewImage={storyboardPreviewImage}
             generatingPreview={generatingPreview}
             generatingImage={generatingImage}
@@ -1706,6 +1298,19 @@ function ImageTab() {
         <div className="alert alert-error text-sm py-2">
           <span>{validationError}</span>
         </div>
+      )}
+
+      {/* Bulk reference mode toggle — only in story mode when preview exists */}
+      {multiSetMode === 'story' && (!!storyboardPreviewImage || !!storyboardPreviewUuid) && (
+        <label className="flex items-center gap-2 cursor-pointer px-2 py-1 bg-base-200 rounded-lg">
+          <input
+            type="checkbox"
+            className="toggle toggle-sm toggle-primary"
+            checked={bulkUsePreviewGrid}
+            onChange={(e) => setBulkUsePreviewGrid(e.target.checked)}
+          />
+          <span className="text-xs">ใช้ Storyboard Preview เป็น Reference (แทน Scene 1)</span>
+        </label>
       )}
 
       {/* Action Buttons */}

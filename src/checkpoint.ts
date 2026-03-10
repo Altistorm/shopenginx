@@ -20,6 +20,7 @@ export interface WorkflowConfig {
   storyTopic: string
   productName: string
   scene: string
+  bulkUsePreviewGrid: boolean
 }
 
 export interface WorkflowStory {
