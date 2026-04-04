@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react'
+import { queryTargetTab } from '../targetTab'
 import { type VideoJob, type VideoOptions, type VideoResult } from './useVideoWorkflow'
 import {
   SceneWorker,
@@ -73,7 +74,7 @@ export function useStoryWorkflow(config: StoryWorkflowConfig, deps: StoryWorkflo
 
   /** Get active tab, validate it's on Google Flow */
   const getFlowTab = useCallback(async (): Promise<chrome.tabs.Tab> => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    const [tab] = await queryTargetTab()
     if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
       throw new Error('กรุณาเปิด Google Flow ก่อน (labs.google/fx/tools/flow)')
     }

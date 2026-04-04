@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { queryTargetTab } from '../targetTab'
 import { generateAllScenePrompts, generateSinglePrompt, type StoryCharacter, VIDEO_TYPE_GROUPS, IMAGE_STYLES } from '../storyPrompts'
 import { useVideoWorkflow, type SceneData } from '../hooks/useVideoWorkflow'
 import { useStoryWorkflow } from '../hooks/useStoryWorkflow'
@@ -299,7 +300,7 @@ function ImageTab() {
       }
     }
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    const [tab] = await queryTargetTab()
 
     // Check if on Google Flow
     if (!tab?.url?.includes('labs.google/fx/tools/flow')) {
@@ -374,7 +375,7 @@ function ImageTab() {
 
   const handleStop = async () => {
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      const [tab] = await queryTargetTab()
       if (tab?.id) {
         await chrome.tabs.sendMessage(tab.id, { type: 'STOP_IMAGE_WORKFLOW' })
       }

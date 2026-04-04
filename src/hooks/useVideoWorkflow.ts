@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { queryTargetTab } from '../targetTab'
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -179,7 +180,7 @@ export function useVideoWorkflow() {
         })
 
         // Get active tab (re-query each iteration — tab may have navigated)
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+        const [tab] = await queryTargetTab()
         if (!tab?.id) {
           throw new Error('No active tab found')
         }
@@ -213,7 +214,7 @@ export function useVideoWorkflow() {
 
         // Update image status if failed
         if (!response.success) {
-          const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+          const [currentTab] = await queryTargetTab()
           setImageStatuses(prev => {
             const updated = [...prev]
             if (updated[jobIndex]) {
@@ -279,7 +280,7 @@ export function useVideoWorkflow() {
         // The Chrome side panel consumes ~400-500px of window width, so a 1200px window
         // can have only ~750px content viewport. Resize once before the loop.
         try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+          const [tab] = await queryTargetTab()
           if (tab?.id) {
             const viewportResult = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIEWPORT_WIDTH' })
             const innerWidth = viewportResult?.innerWidth ?? 0
@@ -300,7 +301,7 @@ export function useVideoWorkflow() {
 
         // Switch to Videos tab
         try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+          const [tab] = await queryTargetTab()
           if (tab?.id) {
             await chrome.tabs.sendMessage(tab.id, { type: 'SWITCH_TO_VIDEOS_TAB' })
             await new Promise(resolve => setTimeout(resolve, 500))
@@ -328,7 +329,7 @@ export function useVideoWorkflow() {
           // Retry loop for this single video (in case of not_found after refresh)
           for (let retry = 0; retry <= maxRetries && !videoAdded; retry++) {
             try {
-              const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+              const [tab] = await queryTargetTab()
               if (!tab?.id) break
 
               // If retrying, refresh the page and switch to Videos tab
@@ -351,7 +352,7 @@ export function useVideoWorkflow() {
               }
 
               // Always ensure Videos tab is active before each attempt
-              const [freshTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+              const [freshTab] = await queryTargetTab()
               if (freshTab?.id) {
                 try {
                   await chrome.tabs.sendMessage(freshTab.id, { type: 'SWITCH_TO_VIDEOS_TAB' })
@@ -362,7 +363,7 @@ export function useVideoWorkflow() {
               }
 
               // Send lightweight click message — returns FAST before any redirect
-              const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+              const [currentTab] = await queryTargetTab()
               if (!currentTab?.id) break
 
               const clickResult = await chrome.tabs.sendMessage(currentTab.id, {
@@ -424,7 +425,7 @@ export function useVideoWorkflow() {
                 await new Promise(resolve => setTimeout(resolve, 3000))
 
                 // Check if page redirected to scenebuilder
-                const [afterClickTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+                const [afterClickTab] = await queryTargetTab()
                 if (afterClickTab?.url?.includes('/scenes/') && !isLast) {
                   // Redirected to scenebuilder — navigate back for remaining videos
                   console.log('[useVideoWorkflow] Redirected to scenebuilder, navigating back for remaining videos')
@@ -432,7 +433,7 @@ export function useVideoWorkflow() {
                     await chrome.tabs.sendMessage(afterClickTab.id!, { type: 'NAVIGATE_BACK_TO_PROJECT' })
                     await new Promise(resolve => setTimeout(resolve, 3000))
                     // Switch to Videos tab on project page
-                    const [projectTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+                    const [projectTab] = await queryTargetTab()
                     if (projectTab?.id) {
                       await chrome.tabs.sendMessage(projectTab.id, { type: 'SWITCH_TO_VIDEOS_TAB' })
                       await new Promise(resolve => setTimeout(resolve, 500))
@@ -455,11 +456,11 @@ export function useVideoWorkflow() {
               // Navigate back if not last video
               if (!isLast) {
                 try {
-                  const [redirectedTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+                  const [redirectedTab] = await queryTargetTab()
                   if (redirectedTab?.id && redirectedTab.url?.includes('/scenes/')) {
                     await chrome.tabs.sendMessage(redirectedTab.id, { type: 'NAVIGATE_BACK_TO_PROJECT' })
                     await new Promise(resolve => setTimeout(resolve, 3000))
-                    const [projectTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+                    const [projectTab] = await queryTargetTab()
                     if (projectTab?.id) {
                       await chrome.tabs.sendMessage(projectTab.id, { type: 'SWITCH_TO_VIDEOS_TAB' })
                       await new Promise(resolve => setTimeout(resolve, 500))
@@ -498,7 +499,7 @@ export function useVideoWorkflow() {
           })
 
           try {
-            const [downloadTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+            const [downloadTab] = await queryTargetTab()
             if (downloadTab?.id) {
               let downloadResult = await chrome.tabs.sendMessage(downloadTab.id, {
                 type: 'DOWNLOAD_SCENE_VIDEO',
@@ -515,7 +516,7 @@ export function useVideoWorkflow() {
                   await new Promise(resolve => setTimeout(resolve, 2000))
                 }
                 // Retry after resize
-                const [retryTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+                const [retryTab] = await queryTargetTab()
                 if (retryTab?.id) {
                   downloadResult = await chrome.tabs.sendMessage(retryTab.id, {
                     type: 'DOWNLOAD_SCENE_VIDEO',
@@ -567,7 +568,7 @@ export function useVideoWorkflow() {
   const stopVideo = useCallback(async () => {
     stopRequestedRef.current = true
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      const [tab] = await queryTargetTab()
       if (tab?.id) {
         await chrome.tabs.sendMessage(tab.id, { type: 'STOP_VIDEO_WORKFLOW' })
       }
