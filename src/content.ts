@@ -167,89 +167,84 @@ class WorkflowOverlay {
   }
 }
 
-// ==================== Flow Image Tracker ====================
-// Uses MutationObserver to track image UUIDs dynamically without scrolling
+// ==================== Flow Generation Tracker ====================
+// Uses MutationObserver to track generation UUIDs dynamically without scrolling
+// Generalized for both image and video completion detection
 
-class FlowImageTracker {
+interface GenerationTrackerConfig {
+  /** Display name for logging, e.g. 'Image' or 'Video' */
+  name: string;
+  /** CSS selector for completed item elements, e.g. 'img[alt="Generated image"]' */
+  itemSelector: string;
+  /** Extract UUID from a matched element */
+  extractUUID: (el: HTMLElement) => string | null;
+  /** Given an added DOM node, return matched item elements within it (or [node] if node itself matches) */
+  matchNewItems: (node: HTMLElement) => HTMLElement[];
+  /** Check if a specific element is a tracked item */
+  isTrackedElement: (el: HTMLElement) => boolean;
+  /** Detect generation errors in the DOM. Return error text or null */
+  detectError: () => string | null;
+  /** Text patterns in added nodes that indicate generation failure */
+  errorTextPatterns: string[];
+  /** Get the MutationObserver container element */
+  getContainer: () => HTMLElement;
+  /** Attributes to watch for changes (e.g. ['src'] for images, ['src'] for videos) */
+  watchAttributes: string[];
+  /** Handle attribute change on a tracked element. Return UUID if relevant, null otherwise */
+  handleAttributeChange?: (target: HTMLElement, attributeName: string) => string | null;
+}
+
+class FlowGenerationTracker {
   private orderedIds: string[] = [];
   private observer: MutationObserver | null = null;
   private isTracking: boolean = false;
 
   // Completion detection state
   private snapshotBeforeGeneration: string[] = [];
-  private expectedNewImageCount: number = 0;
+  private expectedNewItemCount: number = 0;
   private completionResolver: ((newUUIDs: string[]) => void) | null = null;
   private completionRejecter: ((error: Error) => void) | null = null;
   private completionTimeout: ReturnType<typeof setTimeout> | null = null;
-  private pendingImagesWithoutSrc: Set<HTMLImageElement> = new Set();
+  private pendingItemsWithoutId: Set<HTMLElement> = new Set();
   private detectedNewUUIDs: Set<string> = new Set();
   private lastPercentage: number = 0;
   private isGenerating: boolean = false;
   private generationFailed: boolean = false;
 
-  // Check for error containers - result containers that have no image (generation failed)
-  // Returns error text if found, null if no errors
-  // 
-  // Detection strategy: Check if container has img[src*="storage.googleapis.com"]. If not = error.
-  // 
-  // DOM Structure Reference:
-  // - Success: Container has <img src="storage.googleapis.com/...">
-  // - Error: Container has NO image, shows error text instead (e.g., "This generation might violate our policies")
-  // 
-  // Common error text patterns (for reference):
-  // - "Couldn't generate" / "Try again later" - general failure
-  // - "violate our policies" / "might violate" - policy violation
-  private detectErrorContainers(): string | null {
-    // Find all result containers (they have the download/favorite buttons)
-    const resultContainers = document.querySelectorAll('[class*="sc-6349d8ef-7"], [class*="result-container"]');
-    
-    for (const container of resultContainers) {
-      // Check if this container has a Flow Image
-      const hasImage = container.querySelector('img[alt="Generated image"]');
-      
-      if (!hasImage) {
-        // No image = error. Return whatever text is there for logging
-        const textContent = container.textContent?.trim() || 'Unknown error (no image in result container)';
-        console.log('[FlowImageTracker] 🔍 Error container detected (no image):', textContent.substring(0, 100));
-        return textContent.substring(0, 200);
-      }
-    }
-    
-    return null;
-  }
+  constructor(private config: GenerationTrackerConfig) {}
 
-  // Extract UUID from image src URL
-  private extractUUID(src: string): string | null {
-    const match = src.match(/(?:image\/|[?&]name=)([a-f0-9-]+)/);
-    return match ? match[1] : null;
+  // Check for error containers using config delegate
+  private detectErrorContainers(): string | null {
+    return this.config.detectError();
   }
 
   // Update the ordered list based on current DOM state
-  private updateImageOrder() {
-    const images = document.querySelectorAll('img[alt="Generated image"]');
+  private updateItemOrder() {
+    const items = document.querySelectorAll(this.config.itemSelector);
     const visibleIds: string[] = [];
-    const rawSrcs: string[] = [];
+    const rawInfo: string[] = [];
 
-    images.forEach((img) => {
-      const src = (img as HTMLImageElement).src;
-      rawSrcs.push(src.substring(0, 60));
-      const uuid = this.extractUUID(src);
+    items.forEach((el) => {
+      const htmlEl = el as HTMLElement;
+      const src = htmlEl.getAttribute('src') || htmlEl.getAttribute('href') || '';
+      rawInfo.push(src.substring(0, 60));
+      const uuid = this.config.extractUUID(htmlEl);
       if (uuid) {
         visibleIds.push(uuid);
       }
     });
 
-    console.log('[FlowImageTracker] updateImageOrder triggered, images found:', images.length, 'with UUID:', visibleIds.length);
-    console.log('[FlowImageTracker] Raw src URLs:', rawSrcs);
-    console.log('[FlowImageTracker] Extracted UUIDs:', visibleIds);
+    console.log(`[Flow${this.config.name}Tracker] updateItemOrder triggered, items found:`, items.length, 'with UUID:', visibleIds.length);
+    console.log(`[Flow${this.config.name}Tracker] Raw info:`, rawInfo);
+    console.log(`[Flow${this.config.name}Tracker] Extracted UUIDs:`, visibleIds);
 
     // Merge visible IDs with existing order
-    this.mergeImageOrder(visibleIds);
-    console.log('[FlowImageTracker] Updated order, total tracked:', this.orderedIds.length, this.orderedIds);
+    this.mergeItemOrder(visibleIds);
+    console.log(`[Flow${this.config.name}Tracker] Updated order, total tracked:`, this.orderedIds.length, this.orderedIds);
   }
 
   // Merge newly visible IDs into the ordered list
-  private mergeImageOrder(visibleIds: string[]) {
+  private mergeItemOrder(visibleIds: string[]) {
     const existingSet = new Set(this.orderedIds);
     const newIds = visibleIds.filter(id => !existingSet.has(id));
 
@@ -257,7 +252,7 @@ class FlowImageTracker {
 
     // If we have new IDs, we need to insert them in correct position
     if (newIds.length > 0) {
-      console.log('[FlowImageTracker] New images detected:', newIds);
+      console.log(`[Flow${this.config.name}Tracker] New items detected:`, newIds);
 
       // Build result maintaining DOM order for visible items
       // and keeping track of items that scrolled out
@@ -290,43 +285,48 @@ class FlowImageTracker {
     }
   }
 
-  // Track an image that has alt="Flow Image:..." but no valid UUID src yet
-  private trackPendingImage(img: HTMLImageElement) {
-    const uuid = this.extractUUID(img.src);
+  // Track an item that appeared but has no valid UUID yet
+  private trackPendingItem(el: HTMLElement) {
+    const uuid = this.config.extractUUID(el);
     if (!uuid) {
       // No UUID yet - add to pending
-      if (!this.pendingImagesWithoutSrc.has(img)) {
-        this.pendingImagesWithoutSrc.add(img);
-        console.log('[FlowImageTracker] 📥 Pending image added (no UUID yet), total pending:', this.pendingImagesWithoutSrc.size);
+      if (!this.pendingItemsWithoutId.has(el)) {
+        this.pendingItemsWithoutId.add(el);
+        console.log(`[Flow${this.config.name}Tracker] 📥 Pending item added (no UUID yet), total pending:`, this.pendingItemsWithoutId.size);
       }
     } else {
       // Already has UUID - handle immediately
-      this.handleNewUUID(uuid, img);
+      this.handleNewUUID(uuid, el);
     }
   }
 
-  // Handle when an image gets a valid UUID (either from src change or initial load)
-  private handleNewUUID(uuid: string, img: HTMLImageElement) {
+  // Handle when an item gets a valid UUID (either from attribute change or initial load)
+  private handleNewUUID(uuid: string, el: HTMLElement) {
     // Remove from pending if it was there
-    this.pendingImagesWithoutSrc.delete(img);
+    this.pendingItemsWithoutId.delete(el);
 
     // Check if this is a new UUID (not in snapshot before generation)
     const isNew = !this.snapshotBeforeGeneration.includes(uuid);
 
     if (isNew && !this.detectedNewUUIDs.has(uuid)) {
       this.detectedNewUUIDs.add(uuid);
-      console.log('[FlowImageTracker] ✨ New UUID detected:', uuid.substring(0, 8), 'total new:', this.detectedNewUUIDs.size, '/', this.expectedNewImageCount);
+      console.log(`[Flow${this.config.name}Tracker] ✨ New UUID detected:`, uuid.substring(0, 8), 'total new:', this.detectedNewUUIDs.size, '/', this.expectedNewItemCount);
 
       // Check completion immediately - MutationObserver gives us exact timing
       this.checkCompletion();
     }
   }
 
-  // Handle src attribute change on an image
-  private handleSrcChange(img: HTMLImageElement) {
-    const uuid = this.extractUUID(img.src);
+  // Handle attribute change on an item
+  private handleAttributeChangeOnItem(el: HTMLElement, attrName: string) {
+    let uuid: string | null = null;
+    if (this.config.handleAttributeChange) {
+      uuid = this.config.handleAttributeChange(el, attrName);
+    } else {
+      uuid = this.config.extractUUID(el);
+    }
     if (uuid) {
-      this.handleNewUUID(uuid, img);
+      this.handleNewUUID(uuid, el);
     }
   }
 
@@ -337,17 +337,17 @@ class FlowImageTracker {
     }
 
     const newUUIDCount = this.detectedNewUUIDs.size;
-    const pendingCount = this.pendingImagesWithoutSrc.size;
+    const pendingCount = this.pendingItemsWithoutId.size;
 
-    console.log('[FlowImageTracker] 🔍 Completion check:', {
+    console.log(`[Flow${this.config.name}Tracker] 🔍 Completion check:`, {
       newUUIDs: newUUIDCount,
-      expected: this.expectedNewImageCount,
+      expected: this.expectedNewItemCount,
       pending: pendingCount
     });
 
-    // Complete if we have expected count and no pending images
-    if (newUUIDCount >= this.expectedNewImageCount && pendingCount === 0) {
-      console.log('[FlowImageTracker] ✅ Generation complete! New UUIDs:', Array.from(this.detectedNewUUIDs));
+    // Complete if we have expected count and no pending items
+    if (newUUIDCount >= this.expectedNewItemCount && pendingCount === 0) {
+      console.log(`[Flow${this.config.name}Tracker] ✅ Generation complete! New UUIDs:`, Array.from(this.detectedNewUUIDs));
       this.resolveCompletion();
     }
   }
@@ -371,7 +371,7 @@ class FlowImageTracker {
   // Handle percentage update from characterData mutation
   private handlePercentageUpdate(percentage: number) {
     if (percentage !== this.lastPercentage) {
-      console.log('[FlowImageTracker] 📊 Percentage update:', this.lastPercentage, '->', percentage);
+      console.log(`[Flow${this.config.name}Tracker] 📊 Percentage update:`, this.lastPercentage, '->', percentage);
       this.lastPercentage = percentage;
     }
   }
@@ -383,7 +383,7 @@ class FlowImageTracker {
     }
 
     this.generationFailed = true;
-    console.log('[FlowImageTracker] ❌ Generation failed:', errorText);
+    console.log(`[Flow${this.config.name}Tracker] ❌ Generation failed:`, errorText);
 
     // Reject the promise if we have a rejecter
     if (this.completionRejecter) {
@@ -402,79 +402,79 @@ class FlowImageTracker {
     this.isGenerating = false;
   }
 
-  // Start waiting for new images (call before clicking Create)
+  // Start waiting for new items (call before clicking Create)
   waitForNewImages(expectedCount: number, timeoutMs: number = 120000): Promise<string[]> {
     return new Promise((resolve, reject) => {
       // Take snapshot before generation
       this.snapshotBeforeGeneration = [...this.orderedIds];
-      this.expectedNewImageCount = expectedCount;
+      this.expectedNewItemCount = expectedCount;
       this.detectedNewUUIDs.clear();
-      this.pendingImagesWithoutSrc.clear();
+      this.pendingItemsWithoutId.clear();
       this.isGenerating = true;
       this.generationFailed = false;
       this.lastPercentage = 0;
 
-      console.log('[FlowImageTracker] 🚀 Waiting for', expectedCount, 'new images. Snapshot:', this.snapshotBeforeGeneration.length, 'existing');
+      console.log(`[Flow${this.config.name}Tracker] 🚀 Waiting for`, expectedCount, `new ${this.config.name.toLowerCase()}s. Snapshot:`, this.snapshotBeforeGeneration.length, 'existing');
 
       this.completionResolver = resolve;
       this.completionRejecter = reject;
 
       // Set timeout
       this.completionTimeout = setTimeout(() => {
-        console.log('[FlowImageTracker] ⏰ Timeout reached. Detected UUIDs:', Array.from(this.detectedNewUUIDs));
+        console.log(`[Flow${this.config.name}Tracker] ⏰ Timeout reached. Detected UUIDs:`, Array.from(this.detectedNewUUIDs));
         
-        // Check if we got fewer images than expected - might be an error
+        // Check if we got fewer items than expected - might be an error
         const detectedCount = this.detectedNewUUIDs.size;
         if (detectedCount < expectedCount) {
-          console.log('[FlowImageTracker] ⚠️ Got fewer images than expected:', detectedCount, '/', expectedCount);
+          console.log(`[Flow${this.config.name}Tracker] ⚠️ Got fewer items than expected:`, detectedCount, '/', expectedCount);
           
           // Check for error containers
           const errorText = this.detectErrorContainers();
           if (errorText) {
-            console.log('[FlowImageTracker] ❌ Error detected on timeout:', errorText);
+            console.log(`[Flow${this.config.name}Tracker] ❌ Error detected on timeout:`, errorText);
             this.handleGenerationError(errorText);
             return;
           }
           
-          // No explicit error found but still missing images - might be partial failure
+          // No explicit error found but still missing items - might be partial failure
           if (detectedCount === 0) {
-            // Complete failure - no images at all
-            console.log('[FlowImageTracker] ❌ Complete generation failure - no images detected');
-            this.handleGenerationError('Generation timed out with no images produced');
+            // Complete failure - no items at all
+            console.log(`[Flow${this.config.name}Tracker] ❌ Complete generation failure - no items detected`);
+            this.handleGenerationError(`Generation timed out with no ${this.config.name.toLowerCase()}s produced`);
             return;
           }
         }
         
-        // Either got all expected images, or partial success without error
+        // Either got all expected items, or partial success without error
         this.resolveCompletion();
       }, timeoutMs);
     });
   }
 
-  // Cancel waiting for new images
+  // Cancel waiting for new items
   cancelWait() {
     if (this.completionResolver) {
-      console.log('[FlowImageTracker] ❌ Wait cancelled');
+      console.log(`[Flow${this.config.name}Tracker] ❌ Wait cancelled`);
       this.resolveCompletion();
     }
   }
 
-  // Start tracking images
+  // Start tracking items
   start() {
     if (this.isTracking) {
-      console.log('[FlowImageTracker] Already tracking');
+      console.log(`[Flow${this.config.name}Tracker] Already tracking`);
       return;
     }
 
     // Initial scan
-    this.updateImageOrder();
+    this.updateItemOrder();
 
     // Set up MutationObserver
     const onMutation = (mutations: MutationRecord[]) => {
       let hasRelevantChanges = false;
 
       // Log all mutations for debugging
-      console.log('[MutationObserver] Triggered, mutations:', mutations.length);
+      console.log(`[Flow${this.config.name}Tracker-MutationObserver] Triggered, mutations:`, mutations.length);
 
       for (const mutation of mutations) {
         // Log ALL mutations without filtering
@@ -483,7 +483,7 @@ class FlowImageTracker {
           `${targetEl.tagName}${targetEl.className ? '.' + String(targetEl.className).substring(0, 40) : ''}` :
           (mutation.target instanceof Text ? `TEXT:"${mutation.target.textContent?.substring(0, 30)}"` : 'unknown');
 
-        console.log('[MutationObserver]', JSON.stringify({
+        console.log(`[Flow${this.config.name}Tracker-MutationObserver]`, JSON.stringify({
           type: mutation.type,
           target: targetInfo,
           addedNodes: mutation.addedNodes.length,
@@ -497,50 +497,41 @@ class FlowImageTracker {
           if (node instanceof HTMLElement) {
             const nodeInfo = node.tagName + (node.className ? '.' + String(node.className).substring(0, 30) : '');
 
-            // Check if it's an image or contains images
-            if (node.matches && node.matches('img[alt="Generated image"]')) {
-              console.log('[FlowImageTracker] 🖼️ Flow Image added directly:', nodeInfo, (node as HTMLImageElement).src?.substring(0, 60));
+            // Use config to match new items
+            const matchedItems = this.config.matchNewItems(node);
+            if (matchedItems.length > 0) {
+              console.log(`[Flow${this.config.name}Tracker] 🖼️ ${this.config.name} item(s) added:`, nodeInfo, 'count:', matchedItems.length);
               hasRelevantChanges = true;
-              // Track this image for completion detection
+              // Track each item for completion detection
               if (this.isGenerating) {
-                this.trackPendingImage(node as HTMLImageElement);
-              }
-            } else if (node.querySelectorAll) {
-              const imgs = node.querySelectorAll('img[alt="Generated image"]');
-              if (imgs.length > 0) {
-                console.log('[FlowImageTracker] 🖼️ Container with Flow Images added:', nodeInfo, 'images:', imgs.length);
-                hasRelevantChanges = true;
-                // Track each image for completion detection
-                if (this.isGenerating) {
-                  imgs.forEach((img) => {
-                    this.trackPendingImage(img as HTMLImageElement);
-                  });
-                }
+                matchedItems.forEach((item) => {
+                  this.trackPendingItem(item);
+                });
               }
             }
 
             // Log any text content that might contain percentages
             const textContent = node.textContent?.trim();
             if (textContent && /\d{1,3}%/.test(textContent)) {
-              console.log('[FlowImageTracker] 📊 Percentage text detected in added node:', nodeInfo, 'text:', textContent.substring(0, 50));
+              console.log(`[Flow${this.config.name}Tracker] 📊 Percentage text detected in added node:`, nodeInfo, 'text:', textContent.substring(0, 50));
             }
           } else if (node instanceof Text) {
             const textContent = node.textContent?.trim();
             if (textContent && /\d{1,3}%/.test(textContent)) {
-              console.log('[FlowImageTracker] 📊 Percentage text node added:', textContent);
+              console.log(`[Flow${this.config.name}Tracker] 📊 Percentage text node added:`, textContent);
             }
           }
         });
 
-        // Check for attribute changes on images (src changes)
-        if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+        // Check for attribute changes on tracked items
+        if (mutation.type === 'attributes' && mutation.attributeName) {
           const target = mutation.target as HTMLElement;
-          if (target.matches && target.matches('img[alt="Generated image"]')) {
-            console.log('[FlowImageTracker] 🔄 Image src changed:', (target as HTMLImageElement).src?.substring(0, 60));
+          if (this.config.isTrackedElement(target)) {
+            console.log(`[Flow${this.config.name}Tracker] 🔄 ${this.config.name} attribute changed:`, mutation.attributeName, 'on', target.tagName);
             hasRelevantChanges = true;
-            // Handle src change for completion detection
+            // Handle attribute change for completion detection
             if (this.isGenerating) {
-              this.handleSrcChange(target as HTMLImageElement);
+              this.handleAttributeChangeOnItem(target, mutation.attributeName);
             }
           }
         }
@@ -559,7 +550,7 @@ class FlowImageTracker {
             }
             // Also check for XX% format
             if (/^\d{1,3}%$/.test(textContent)) {
-              console.log('[FlowImageTracker] 📊 Text content changed to percentage:', textContent);
+              console.log(`[Flow${this.config.name}Tracker] 📊 Text content changed to percentage:`, textContent);
             }
           }
         }
@@ -568,46 +559,43 @@ class FlowImageTracker {
         mutation.addedNodes.forEach((node) => {
           if (node instanceof HTMLElement || node instanceof Text) {
             const text = node.textContent?.trim() || '';
-            // Detect generation failure - error message replaces percentage
-            // Common error patterns:
-            // - "Couldn't generate" / "Try again later" - general failure
-            // - "violate our policies" / "might violate" - policy violation
-            if (text.includes("Couldn't generate") || 
-                text.includes('Try again later') ||
-                text.includes('violate') ||
-                text.includes('policies')) {
-              console.log('[FlowImageTracker] ❌ Generation error detected:', text.substring(0, 80));
-              this.handleGenerationError(text);
+            // Detect generation failure using config error patterns
+            for (const pattern of this.config.errorTextPatterns) {
+              if (text.includes(pattern)) {
+                console.log(`[Flow${this.config.name}Tracker] ❌ Generation error detected:`, text.substring(0, 80));
+                this.handleGenerationError(text);
+                break;
+              }
             }
           }
         });
       }
 
       if (hasRelevantChanges) {
-        console.log('[FlowImageTracker] ✅ Relevant changes detected, updating image order...');
+        console.log(`[Flow${this.config.name}Tracker] ✅ Relevant changes detected, updating item order...`);
         // Debounce updates
-        setTimeout(() => this.updateImageOrder(), 100);
+        setTimeout(() => this.updateItemOrder(), 100);
       }
     };
 
     this.observer = new MutationObserver(onMutation);
 
-    // Find the scroll container or use body
-    const container = document.querySelector('[data-testid="virtuoso-item-list"]') || document.body;
+    // Find the container via config
+    const container = this.config.getContainer();
 
     this.observer.observe(container, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src'],
+      attributeFilter: this.config.watchAttributes,
       characterData: true,
       characterDataOldValue: true
     });
 
-    console.log('[FlowImageTracker] Observer attached to:', container.tagName, container.className?.substring(0, 50));
+    console.log(`[Flow${this.config.name}Tracker] Observer attached to:`, container.tagName, (container.className || '').substring(0, 50));
 
     this.isTracking = true;
-    console.log('[FlowImageTracker] Started tracking');
+    console.log(`[Flow${this.config.name}Tracker] Started tracking`);
   }
 
   // Stop tracking
@@ -617,27 +605,27 @@ class FlowImageTracker {
       this.observer = null;
     }
     this.isTracking = false;
-    console.log('[FlowImageTracker] Stopped tracking');
+    console.log(`[Flow${this.config.name}Tracker] Stopped tracking`);
   }
 
   // Get current snapshot of ordered IDs
   getSnapshot(): string[] {
-    // Update before returning to ensure we have latest visible images
-    this.updateImageOrder();
+    // Update before returning to ensure we have latest visible items
+    this.updateItemOrder();
     return [...this.orderedIds];
   }
 
-  // Get new images compared to a previous snapshot
+  // Get new items compared to a previous snapshot
   getNewImages(previousSnapshot: string[]): string[] {
     const previousSet = new Set(previousSnapshot);
-    // Update to get any new images
-    this.updateImageOrder();
+    // Update to get any new items
+    this.updateItemOrder();
     return this.orderedIds.filter(id => !previousSet.has(id));
   }
 
   // Get total count
   getCount(): number {
-    this.updateImageOrder();
+    this.updateItemOrder();
     return this.orderedIds.length;
   }
 
@@ -645,9 +633,9 @@ class FlowImageTracker {
   reset() {
     this.orderedIds = [];
     this.snapshotBeforeGeneration = [];
-    this.expectedNewImageCount = 0;
+    this.expectedNewItemCount = 0;
     this.detectedNewUUIDs.clear();
-    this.pendingImagesWithoutSrc.clear();
+    this.pendingItemsWithoutId.clear();
     this.isGenerating = false;
     this.generationFailed = false;
     this.lastPercentage = 0;
@@ -662,7 +650,7 @@ class FlowImageTracker {
     }
     this.completionRejecter = null;
 
-    console.log('[FlowImageTracker] Reset');
+    console.log(`[Flow${this.config.name}Tracker] Reset`);
   }
 
   // Check if tracking
@@ -671,8 +659,137 @@ class FlowImageTracker {
   }
 }
 
-// Global instance
-const flowImageTracker = new FlowImageTracker();
+// ==================== Tracker Configs ====================
+
+const IMAGE_TRACKER_CONFIG: GenerationTrackerConfig = {
+  name: 'Image',
+  itemSelector: 'img[alt="Generated image"]',
+  extractUUID: (el: HTMLElement) => {
+    const src = (el as HTMLImageElement).src || el.getAttribute('src') || '';
+    const match = src.match(/(?:image\/|[?&]name=)([a-f0-9-]+)/);
+    return match ? match[1] : null;
+  },
+  matchNewItems: (node: HTMLElement) => {
+    if (node.matches && node.matches('img[alt="Generated image"]')) {
+      return [node];
+    }
+    if (node.querySelectorAll) {
+      return Array.from(node.querySelectorAll('img[alt="Generated image"]')) as HTMLElement[];
+    }
+    return [];
+  },
+  isTrackedElement: (el: HTMLElement) => {
+    return !!(el.matches && el.matches('img[alt="Generated image"]'));
+  },
+  detectError: () => {
+    const resultContainers = document.querySelectorAll('[class*="sc-6349d8ef-7"], [class*="result-container"]');
+    for (const container of resultContainers) {
+      const hasImage = container.querySelector('img[alt="Generated image"]');
+      if (!hasImage) {
+        const textContent = container.textContent?.trim() || 'Unknown error (no image in result container)';
+        console.log('[FlowImageTracker] Error container detected (no image):', textContent.substring(0, 100));
+        return textContent.substring(0, 200);
+      }
+    }
+    return null;
+  },
+  errorTextPatterns: ["Couldn't generate", 'Try again later', 'violate', 'policies'],
+  getContainer: () => {
+    return (document.querySelector('[data-testid="virtuoso-item-list"]') || document.body) as HTMLElement;
+  },
+  watchAttributes: ['src'],
+  handleAttributeChange: (target: HTMLElement, attributeName: string) => {
+    if (attributeName === 'src') {
+      const src = (target as HTMLImageElement).src || '';
+      const match = src.match(/(?:image\/|[?&]name=)([a-f0-9-]+)/);
+      return match ? match[1] : null;
+    }
+    return null;
+  },
+};
+
+const VIDEO_TRACKER_CONFIG: GenerationTrackerConfig = {
+  name: 'Video',
+  itemSelector: 'video[src]',
+  extractUUID: (el: HTMLElement) => {
+    // Try video src first
+    const src = (el as HTMLVideoElement).src || el.getAttribute('src') || '';
+    const videoMatch = src.match(/(?:video\/|[?&]name=)([a-f0-9-]{36})/);
+    if (videoMatch) return videoMatch[1];
+    // Try parent/ancestor <a href="/edit/UUID">
+    const anchor = el.closest('a[href*="/edit/"]');
+    if (anchor) {
+      const hrefMatch = anchor.getAttribute('href')?.match(/\/edit\/([a-f0-9-]{36})/);
+      if (hrefMatch) return hrefMatch[1];
+    }
+    return null;
+  },
+  matchNewItems: (node: HTMLElement) => {
+    const items: HTMLElement[] = [];
+    // Match video elements
+    if (node.matches && node.matches('video[src]')) {
+      items.push(node);
+    }
+    if (node.querySelectorAll) {
+      items.push(...Array.from(node.querySelectorAll('video[src]')) as HTMLElement[]);
+    }
+    // Also match completed video tiles: <a href="/edit/..."> links that contain play_circle
+    // but NOT percentage text (which means still generating)
+    if (node.matches && node.matches('a[href*="/edit/"]')) {
+      const text = node.textContent || '';
+      if (text.includes('play_circle') && !/\d{1,3}%/.test(text)) {
+        items.push(node);
+      }
+    }
+    if (node.querySelectorAll) {
+      const links = node.querySelectorAll('a[href*="/edit/"]');
+      for (const link of links) {
+        const text = link.textContent || '';
+        if (text.includes('play_circle') && !/\d{1,3}%/.test(text)) {
+          items.push(link as HTMLElement);
+        }
+      }
+    }
+    return items;
+  },
+  isTrackedElement: (el: HTMLElement) => {
+    if (el.matches && el.matches('video[src]')) return true;
+    if (el.matches && el.matches('a[href*="/edit/"]')) {
+      const text = el.textContent || '';
+      return text.includes('play_circle') && !/\d{1,3}%/.test(text);
+    }
+    return false;
+  },
+  detectError: () => {
+    // Look for tiles with Failed/warning text and Retry/Delete buttons
+    const allLinks = document.querySelectorAll('a[href*="/edit/"]');
+    for (const link of allLinks) {
+      const text = link.textContent || '';
+      if (text.includes('warning') && (text.includes('Failed') || text.includes('Retry') || text.includes('Delete'))) {
+        console.log('[FlowVideoTracker] Error tile detected:', text.substring(0, 100));
+        return text.substring(0, 200);
+      }
+    }
+    return null;
+  },
+  errorTextPatterns: ['Failed', 'interests of third-party', "can't generate", 'warning'],
+  getContainer: () => {
+    return (document.querySelector('[data-testid="virtuoso-item-list"]') || document.body) as HTMLElement;
+  },
+  watchAttributes: ['src'],
+  handleAttributeChange: (target: HTMLElement, attributeName: string) => {
+    if (attributeName === 'src') {
+      const src = (target as HTMLVideoElement).src || '';
+      const match = src.match(/(?:video\/|[?&]name=)([a-f0-9-]{36})/);
+      return match ? match[1] : null;
+    }
+    return null;
+  },
+};
+
+// Global instances
+const flowImageTracker = new FlowGenerationTracker(IMAGE_TRACKER_CONFIG);
+const flowVideoTracker = new FlowGenerationTracker(VIDEO_TRACKER_CONFIG);
 
 // ==================== Video Flow Controller ====================
 // Automates video generation workflow on Google Flow
@@ -969,8 +1086,365 @@ const checkCurrentSettings = (aspectRatio?: string, outputCount?: number): { rat
   return result;
 };
 
+/**
+ * Configure Google Flow settings (mode, aspect ratio, image count) by directly
+ * manipulating the Radix config popper from the content script.
+ * Previously routed through background.ts + chrome.scripting.executeScript({ world: 'MAIN' }),
+ * but chrome.runtime.sendMessage is unreliable when side panel onMessage listeners
+ * close the response channel before the background's async sendResponse fires.
+ * DOM events (pointer/mouse/click) work from the content script's isolated world.
+ */
+async function configureFlowSettings(
+  payload: { mode?: string; aspectRatio?: string; imageCount?: number },
+  tag: string = 'Flow',
+): Promise<{ success: boolean; results?: Record<string, boolean>; error?: string }> {
+  const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+  const log = (msg: string) => console.log(`[${tag}:CONFIGURE] ${msg}`);
+
+  const clickElement = async (el: HTMLElement) => {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', clientX: x, clientY: y, isPrimary: true }));
+    await wait(50);
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    await wait(50);
+    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', clientX: x, clientY: y, isPrimary: true }));
+    await wait(50);
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    await wait(50);
+    el.click();
+  };
+
+  try {
+    const { mode, aspectRatio, imageCount } = payload;
+    log(`Starting: mode=${mode}, aspectRatio=${aspectRatio}, imageCount=${imageCount}`);
+
+    // Find config trigger button
+    const findTrigger = (): HTMLElement | null => {
+      const buttons = document.querySelectorAll('button[aria-haspopup="menu"]');
+      for (const btn of buttons) {
+        if (!(btn as HTMLElement).offsetParent) continue;
+        if (btn.closest('[data-radix-popper-content-wrapper]')) continue;
+        if (btn.closest('[role="menu"]')) continue;
+        if (!btn.querySelector('[data-type="button-overlay"]')) continue;
+        const icons = btn.querySelectorAll('i');
+        for (const icon of icons) {
+          if ((icon.textContent || '').trim().toLowerCase().includes('crop_')) return btn as HTMLElement;
+        }
+      }
+      return null;
+    };
+
+    const trigger = findTrigger();
+    if (!trigger) {
+      log('Trigger NOT found');
+      return { success: false, error: 'Config trigger button not found' };
+    }
+    log('Trigger found: ' + (trigger.textContent || '').trim().substring(0, 50));
+
+    // Open config popper
+    if (trigger.getAttribute('aria-expanded') !== 'true' && trigger.getAttribute('data-state') !== 'open') {
+      log('Opening popper');
+      await clickElement(trigger);
+      await wait(800);
+    }
+
+    const getPopper = () =>
+      document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
+      document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
+
+    let popper = getPopper();
+    if (!popper) {
+      const overlay = trigger.querySelector('[data-type="button-overlay"]') as HTMLElement;
+      if (overlay) { await clickElement(overlay); await wait(800); }
+      popper = getPopper();
+    }
+    if (!popper) {
+      log('Popper did NOT open');
+      return { success: false, error: 'Config popper did not open' };
+    }
+
+    // Helper: find and click a tab
+    const clickTab = async (iconMatch: string | null, textMatch: string | null): Promise<boolean> => {
+      const currentPopper = getPopper() || popper;
+      const tabs = currentPopper.querySelectorAll('button[role="tab"]');
+      log(`clickTab(icon=${iconMatch}, text=${textMatch}): ${tabs.length} tabs`);
+      for (const tab of tabs) {
+        if (iconMatch) {
+          const icon = tab.querySelector('i');
+          if (!icon || (icon.textContent || '').trim().toLowerCase() !== iconMatch) continue;
+        } else if (textMatch) {
+          const txt = (tab.textContent || '').trim().toLowerCase();
+          if (txt !== textMatch && txt !== textMatch.replace('x', '')) continue;
+        }
+        if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') {
+          log(`  '${iconMatch || textMatch}' already active`);
+          return true;
+        }
+        log(`  Clicking '${iconMatch || textMatch}'...`);
+        await clickElement(tab as HTMLElement);
+        await wait(600);
+        // Re-check with fresh reference
+        const freshPopper = getPopper() || popper;
+        const freshTabs = freshPopper.querySelectorAll('button[role="tab"]');
+        for (const ft of freshTabs) {
+          if (iconMatch) {
+            const fi = ft.querySelector('i');
+            if (!fi || (fi.textContent || '').trim().toLowerCase() !== iconMatch) continue;
+          } else if (textMatch) {
+            const txt = (ft.textContent || '').trim().toLowerCase();
+            if (txt !== textMatch && txt !== textMatch.replace('x', '')) continue;
+          }
+          const isActive = ft.getAttribute('data-state') === 'active' || ft.getAttribute('aria-selected') === 'true';
+          log(`  '${iconMatch || textMatch}' re-check: ${isActive}`);
+          return isActive;
+        }
+        log(`  '${iconMatch || textMatch}' lost after click`);
+        return false;
+      }
+      log(`  No tab matched '${iconMatch || textMatch}'`);
+      return false;
+    };
+
+    const results: Record<string, boolean> = {};
+
+    if (mode) {
+      results.mode = await clickTab(mode, null);
+      log(`Mode ${mode}: ${results.mode ? 'ok' : 'FAILED'}`);
+      await wait(300);
+    }
+    if (aspectRatio) {
+      const icon = aspectRatio === '9:16' ? 'crop_9_16' : 'crop_16_9';
+      results.ratio = await clickTab(icon, null);
+      log(`Ratio ${aspectRatio}: ${results.ratio ? 'ok' : 'FAILED'}`);
+      await wait(300);
+    }
+    if (imageCount) {
+      results.count = await clickTab(null, `x${imageCount}`);
+      log(`Count ${imageCount}: ${results.count ? 'ok' : 'FAILED'}`);
+      await wait(300);
+    }
+
+    // Close popper
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    await wait(200);
+    document.body.click();
+    await wait(300);
+
+    return { success: true, results };
+  } catch (e: any) {
+    log(`UNCAUGHT ERROR: ${e?.message || e}`);
+    return { success: false, error: `Uncaught: ${e?.message || e}` };
+  }
+}
+
+const FlowUIActions = {
+  /**
+   * Dispatch full synthetic pointer+mouse click event sequence on an element.
+   * Radix UI components require this instead of simple .click().
+   */
+  dispatchSyntheticClick(el: HTMLElement): void {
+    const rect = el.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    const eventInit: PointerEventInit & MouseEventInit = {
+      bubbles: true, cancelable: true,
+      clientX: x, clientY: y, screenX: x, screenY: y,
+      view: window, button: 0, buttons: 1,
+    };
+    el.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerId: 1 }));
+    el.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerId: 1, bubbles: false }));
+    el.dispatchEvent(new MouseEvent('mouseover', eventInit));
+    el.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerId: 1 }));
+    el.dispatchEvent(new MouseEvent('mousedown', eventInit));
+    el.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerId: 1, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
+  },
+
+  /** Find the gallery scroll container by detecting overflow:auto div with generated images. */
+  findGalleryScrollContainer(): HTMLElement | null {
+    const allDivs = document.querySelectorAll('div');
+    for (const el of allDivs) {
+      const style = getComputedStyle(el);
+      const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                            style.overflowY === 'auto' || style.overflowY === 'scroll';
+      if (isScrollable && el.scrollHeight > el.clientHeight + 100 && (el as HTMLElement).clientHeight > 200) {
+        if (el.querySelectorAll('img[alt="Generated image"]').length > 0) {
+          return el as HTMLElement;
+        }
+      }
+    }
+    return null;
+  },
+
+  /** Find gallery image by UUID using incremental scroll (handles virtualized galleries). */
+  async scrollToFindImage(
+    imageUuid: string,
+    delayFn: (ms: number) => Promise<void>,
+    tag: string = 'FlowUI',
+  ): Promise<HTMLElement | null> {
+    const container = FlowUIActions.findGalleryScrollContainer();
+    if (!container) {
+      console.warn(`[${tag}] Gallery scroll container not found`);
+      return document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
+    }
+
+    const clientHeight = container.clientHeight;
+    const stepSize = Math.floor(clientHeight * 0.7);
+    const maxSteps = Math.ceil(container.scrollHeight / stepSize) + 2;
+
+    container.scrollTop = 0;
+    await delayFn(300);
+
+    for (let step = 0; step < maxSteps; step++) {
+      const imgEl = document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
+      if (imgEl) {
+        console.log(`[${tag}] Found image UUID ${imageUuid.substring(0, 8)}... at scroll step ${step}`);
+        return imgEl;
+      }
+
+      container.scrollTop += stepSize;
+      await delayFn(500);
+
+      if (container.scrollTop + container.clientHeight >= container.scrollHeight - 10) {
+        const lastCheck = document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
+        if (lastCheck) return lastCheck;
+        break;
+      }
+    }
+
+    console.log(`[${tag}] Image UUID ${imageUuid.substring(0, 8)}... not found after scrolling`);
+    return null;
+  },
+
+  /** Hover over ancestor elements to reveal toolbar overlay on a gallery tile. */
+  hoverAncestors(el: HTMLElement, levels: number = 5): void {
+    const targets: HTMLElement[] = [];
+    let current: HTMLElement | null = el;
+    for (let i = 0; i < levels && current; i++) {
+      current = current.parentElement;
+      if (current) targets.push(current);
+    }
+    for (const target of targets) {
+      target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    }
+  },
+
+  /** Find the "More" (more_vert) toolbar button near an image element. */
+  findMoreButton(img: HTMLElement): HTMLButtonElement | null {
+    // Primary: find in [role="toolbar"]
+    let searchRoot: Element | null = img;
+    for (let i = 0; i < 6 && searchRoot; i++) {
+      searchRoot = searchRoot.parentElement;
+      if (searchRoot) {
+        const toolbar = searchRoot.querySelector('[role="toolbar"]');
+        if (toolbar) {
+          const buttons = toolbar.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (btn.textContent?.includes('more_vert')) {
+              return btn as HTMLButtonElement;
+            }
+          }
+        }
+      }
+    }
+    // Fallback: search without toolbar constraint
+    searchRoot = img;
+    for (let i = 0; i < 8 && searchRoot; i++) {
+      searchRoot = searchRoot.parentElement;
+      if (searchRoot) {
+        const buttons = searchRoot.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.includes('more_vert') && btn.textContent?.includes('More')) {
+            return btn as HTMLButtonElement;
+          }
+        }
+      }
+    }
+    return null;
+  },
+
+  /** Check if an image UUID is already added as an ingredient (chip in prompt bar). */
+  isImageAlreadyAdded(uuid: string): boolean {
+    return !!document.querySelector(`button img[alt*="piece of media"][src*="${uuid}"]`);
+  },
+
+  /**
+   * Full "Add to Prompt" flow: find image → hover → More button → menu → Add to Prompt.
+   * Shared by both VideoFlowController and ImageFlowController.
+   */
+  async addImageToPrompt(
+    imageUuid: string,
+    waitForFn: (condition: () => boolean, name: string, timeoutMs: number) => Promise<void>,
+    delayFn: (ms: number) => Promise<void>,
+    confirmTimeoutMs: number = 10000,
+    tag: string = 'FlowUI',
+  ): Promise<void> {
+    console.log(`[${tag}] Adding image ${imageUuid.substring(0, 8)}... to prompt via gallery`);
+    await delayFn(300);
+
+    // Find image (scroll if virtualized)
+    const img = await FlowUIActions.scrollToFindImage(imageUuid, delayFn, tag);
+    if (!img) throw new Error(`Gallery image not found for UUID: ${imageUuid}`);
+
+    // Skip if already added
+    if (FlowUIActions.isImageAlreadyAdded(imageUuid)) {
+      console.log(`[${tag}] Image ${imageUuid.substring(0, 8)}... already added as ingredient, skipping`);
+      return;
+    }
+
+    // Hover to reveal toolbar
+    FlowUIActions.hoverAncestors(img);
+    await delayFn(300);
+
+    // Find and click "More" button
+    const moreBtn = FlowUIActions.findMoreButton(img);
+    if (!moreBtn) throw new Error(`"More" button not found in toolbar for image UUID: ${imageUuid}`);
+
+    FlowUIActions.dispatchSyntheticClick(moreBtn);
+    console.log(`[${tag}] Clicked More button for image ${imageUuid.substring(0, 8)}...`);
+
+    // Wait for dropdown menu with "Add to Prompt" menuitem
+    let addMenuItem: HTMLElement | null = null;
+    await waitForFn(
+      () => {
+        const menuItems = document.querySelectorAll('[role="menuitem"]');
+        for (const item of menuItems) {
+          if (item.textContent?.includes('Add to Prompt')) {
+            addMenuItem = item as HTMLElement;
+            return true;
+          }
+        }
+        return false;
+      },
+      `"Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}`,
+      5000
+    );
+
+    if (!addMenuItem) throw new Error(`"Add to Prompt" menuitem not found for image UUID: ${imageUuid}`);
+
+    // Click the menuitem
+    FlowUIActions.dispatchSyntheticClick(addMenuItem);
+    console.log(`[${tag}] Clicked "Add to Prompt" for image ${imageUuid.substring(0, 8)}...`);
+
+    // Wait for confirmation (ingredient chip appears in prompt bar)
+    await waitForFn(
+      () => FlowUIActions.isImageAlreadyAdded(imageUuid),
+      `ingredient chip for image ${imageUuid.substring(0, 8)}`,
+      confirmTimeoutMs,
+    );
+    await delayFn(500);
+    console.log(`[${tag}] Added image ${imageUuid.substring(0, 8)} to prompt`);
+  },
+};
+
 class VideoFlowController {
   private observer: MutationObserver | null = null;
+  private debugObserver: MutationObserver | null = null;
   private pendingResolvers: Array<{
     condition: () => boolean;
     resolve: () => void;
@@ -1007,6 +1481,94 @@ class VideoFlowController {
       }
     }
     this.progressCallback = onProgress || null;
+    this.startDebugObserver();
+  }
+
+  // ==================== Debug MutationObserver ====================
+
+  private startDebugObserver(): void {
+    if (this.debugObserver) return;
+
+    this.debugObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        // Log added elements — video-specific focus
+        for (const node of m.addedNodes) {
+          if (node.nodeType === 1) {
+            const el = node as HTMLElement;
+            const tag = el.tagName;
+            const role = el.getAttribute('role');
+            const text = el.textContent?.substring(0, 80)?.replace(/\s+/g, ' ');
+
+            // Video elements appearing (new video rendered)
+            if (tag === 'VIDEO') {
+              const src = el.getAttribute('src')?.substring(0, 50);
+              console.log(`[Video-DOM+] <VIDEO> src="${src}"`);
+              continue;
+            }
+
+            // Video tile links with progress (e.g. "videocam 7% prompt text")
+            if (tag === 'A' && text && (text.includes('videocam') || text.match(/\d{1,3}%/))) {
+              console.log(`[Video-DOM+] <A> "${text}"`);
+              continue;
+            }
+
+            // Generation failure / success indicators
+            if (text && (
+              text.includes('Failed') || text.includes('warning') ||
+              text.includes('Retry') || text.includes('Reuse Prompt') ||
+              text.includes('Add to scene') || text.includes('play_circle') ||
+              text.includes('Extend') || text.includes('Generating')
+            )) {
+              console.log(`[Video-DOM+] <${tag} role="${role}"> "${text}"`);
+              continue;
+            }
+
+            // Dialogs (Notice, agreement, etc.)
+            if (role === 'dialog' || role === 'menu') {
+              console.log(`[Video-DOM+] <${tag} role="${role}"> "${text}"`);
+            }
+          }
+        }
+
+        // Log removed video elements
+        for (const node of m.removedNodes) {
+          if (node.nodeType === 1) {
+            const el = node as HTMLElement;
+            const tag = el.tagName;
+            const role = el.getAttribute('role');
+            if (tag === 'VIDEO') {
+              console.log(`[Video-DOM-] <VIDEO> removed`);
+            } else if (role === 'dialog' || role === 'menu') {
+              console.log(`[Video-DOM-] <${tag} role="${role}"> removed`);
+            }
+          }
+        }
+
+        // Track characterData changes — percentage progress updates
+        if (m.type === 'characterData') {
+          const text = m.target.textContent?.trim() || '';
+          if (text.match(/^\d{1,3}$/) || text.match(/^\d{1,3}%$/)) {
+            console.log(`[Video-DOM~] Percentage: ${text}`);
+          }
+        }
+      }
+    });
+
+    this.debugObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+      attributeFilter: ['data-state', 'aria-expanded']
+    });
+    console.log('[VideoFlowController] Debug observer started');
+  }
+
+  private stopDebugObserver(): void {
+    if (this.debugObserver) {
+      this.debugObserver.disconnect();
+      this.debugObserver = null;
+    }
   }
 
   // ==================== MutationObserver Core ====================
@@ -1128,6 +1690,7 @@ class VideoFlowController {
       this.observer.disconnect();
       this.observer = null;
     }
+    this.stopDebugObserver();
     // Reject all pending resolvers
     for (const resolver of this.pendingResolvers) {
       clearTimeout(resolver.timeout);
@@ -1194,13 +1757,12 @@ class VideoFlowController {
    * Step: Ensure we're in "Frames to Video" mode
    */
   async ensureVideoMode(): Promise<void> {
-    // Use Main World to click Radix tabs (content script clicks don't register)
-    const result = await chrome.runtime.sendMessage({
-      action: 'CONFIGURE_FLOW_SETTINGS',
-      mode: 'videocam',
-    });
+    const result = await configureFlowSettings({ mode: 'videocam' }, 'VideoFlow');
     if (!result?.success) {
       throw new Error(`Switch to video mode failed: ${result?.error || 'unknown'}`);
+    }
+    if (result.results?.mode === false) {
+      throw new Error('Switch to video mode: tab click did not activate videocam mode');
     }
     console.log('[VideoFlowController] Switched to Frames to Video mode via Main World');
     await this.delay(300);
@@ -1210,14 +1772,13 @@ class VideoFlowController {
    * Step: Configure settings (aspect ratio + output count) via Radix config popper
    */
   async configureSettings(aspectRatio: '9:16' | '16:9', outputCount: number): Promise<void> {
-    // Use Main World to click Radix tabs (content script clicks don't register)
-    const result = await chrome.runtime.sendMessage({
-      action: 'CONFIGURE_FLOW_SETTINGS',
-      aspectRatio,
-      imageCount: outputCount,
-    });
+    const result = await configureFlowSettings({ aspectRatio, imageCount: outputCount }, 'VideoFlow');
     if (!result?.success) {
-      throw new Error(`Configure settings failed: ${result?.error || 'unknown'}`);
+      throw new Error(`Configure video settings failed: ${result?.error || 'unknown'}`);
+    }
+    const r = result.results || {};
+    if (r.ratio === false || r.count === false) {
+      throw new Error(`Configure video settings: partial failure (ratio=${r.ratio}, count=${r.count})`);
     }
     console.log('[VideoFlowController] Settings configured via Main World:', result.results);
     await this.delay(300);
@@ -1462,66 +2023,13 @@ class VideoFlowController {
    */
   async clickAddToPromptByUuid(uuid: string): Promise<void> {
     const config = this.stepConfig['clickAddToPromptByUuid'];
-
-    // Wait for the image to appear in the gallery
-    await this.waitFor(
-      () => document.querySelector(`img[src*="${uuid}"]`) !== null,
-      `gallery image ${uuid.substring(0, 8)} visible`,
-      config.timeoutMs
+    await FlowUIActions.addImageToPrompt(
+      uuid,
+      (condition, name, timeout) => this.waitFor(condition, name, timeout),
+      (ms) => this.delay(ms),
+      config.timeoutMs,
+      'VideoFlowController',
     );
-
-    const img = document.querySelector(`img[src*="${uuid}"]`) as HTMLElement | null;
-    if (!img) throw new Error(`Gallery image not found for UUID: ${uuid}`);
-
-    // Hover over the image container to reveal overlay buttons.
-    // The "Add To Prompt" button is lazy-loaded on hover, so we hover multiple
-    // ancestor levels and then waitFor the button rather than using a fixed delay.
-    const hoverTargets: HTMLElement[] = [];
-    let el: HTMLElement | null = img;
-    for (let i = 0; i < 5 && el; i++) {
-      el = el.parentElement;
-      if (el) hoverTargets.push(el);
-    }
-    // Dispatch hover events on all ancestor containers (one of them is the hover target)
-    for (const target of hoverTargets) {
-      target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    }
-
-    // Wait for "Add To Prompt" button to appear near this image (instead of fixed 500ms)
-    let addBtn: HTMLButtonElement | null = null;
-    await this.waitFor(
-      () => {
-        let searchRoot: Element | null = img;
-        for (let i = 0; i < 8 && searchRoot; i++) {
-          searchRoot = searchRoot.parentElement;
-          if (searchRoot) {
-            const buttons = searchRoot.querySelectorAll('button');
-            for (const btn of buttons) {
-              if (btn.textContent?.includes('Add To Prompt')) {
-                addBtn = btn as HTMLButtonElement;
-                return true;
-              }
-            }
-          }
-        }
-        return false;
-      },
-      `Add To Prompt button for ${uuid.substring(0, 8)}`,
-      10000
-    );
-
-    if (!addBtn) throw new Error(`"Add To Prompt" button not found for UUID: ${uuid}`);
-    addBtn.click();
-
-    // Wait for the button to change to "Remove From Prompt" (confirms ingredient was added)
-    await this.waitFor(
-      () => findButtonByText('Remove From Prompt') !== null,
-      'ingredient added (Remove From Prompt visible)',
-      config.timeoutMs
-    );
-    await this.delay(500);
-    console.log(`[VideoFlowController] Added image ${uuid.substring(0, 8)} to prompt`);
   }
 
   /**
@@ -1555,71 +2063,49 @@ class VideoFlowController {
    * Step: Switch the mode dropdown to "Frames to Video"
    */
   async switchToFramesToVideo(): Promise<void> {
-    const config = this.stepConfig['switchToFramesToVideo'];
-
-    // Check if already on "Frames to Video"
-    const modeDropdown = document.querySelector('[role="combobox"]');
-    if (modeDropdown?.textContent?.includes('Frames to Video')) {
-      console.log('[VideoFlowController] Already in Frames to Video mode');
-      return;
+    const result = await configureFlowSettings({ mode: 'videocam' }, 'VideoFlow');
+    if (!result?.success) {
+      throw new Error(`Switch to Frames to Video failed: ${result?.error || 'unknown'}`);
     }
-
-    // Click the mode combobox to open dropdown
-    const combobox = findByText('[role="combobox"]', 'arrow_drop_down');
-    if (!combobox) throw new Error('Mode dropdown combobox not found');
-    combobox.click();
-
-    // Wait for listbox with options to appear
-    await this.waitFor(
-      () => findByText('[role="option"]', 'Frames to Video') !== null,
-      'Frames to Video option visible',
-      config.timeoutMs
-    );
-    await this.delay(200);
-
-    // Click "Frames to Video" option
-    const option = findByText('[role="option"]', 'Frames to Video');
-    if (!option) throw new Error('"Frames to Video" option not found in dropdown');
-    option.click();
-
-    // Wait for mode to change
-    await this.waitFor(
-      () => {
-        const current = document.querySelector('[role="combobox"]');
-        return current?.textContent?.includes('Frames to Video') ?? false;
-      },
-      'mode change to Frames to Video',
-      config.timeoutMs
-    );
-    await this.delay(500);
-    console.log('[VideoFlowController] Switched to Frames to Video mode');
+    if (result.results?.mode === false) {
+      throw new Error('Switch to Frames to Video: tab click did not activate videocam mode');
+    }
+    console.log('[VideoFlowController] Switched to Frames to Video mode via Main World');
+    await this.delay(300);
   }
 
   /**
    * Switch to Videos tab in the gallery (the radio with "Videos" text)
    */
   async switchToVideosTab(): Promise<void> {
-    // Check if already on Videos tab
-    const alreadyActive = document.querySelector('button[role="radio"][aria-checked="true"]');
-    if (alreadyActive?.textContent?.includes('Videos')) {
-      console.log('[VideoFlowController] Videos tab already active');
+    // Old UI used [role="radio"] tabs for Images/Videos switching — those are gone.
+    // New UI may use gallery filter buttons (e.g. "videocam View videos").
+    // Try the new pattern first, fall back to old pattern, then soft-fail.
+
+    // Try new gallery filter button pattern
+    const allButtons = document.querySelectorAll('button');
+    for (const btn of allButtons) {
+      const text = (btn.textContent || '').toLowerCase();
+      if ((text.includes('video') && (text.includes('view') || text.includes('filter'))) ||
+          text === 'videocam' || text.includes('view videos')) {
+        (btn as HTMLElement).click();
+        await this.delay(500);
+        console.log('[VideoFlowController] Switched to Videos view via gallery filter button');
+        return;
+      }
+    }
+
+    // Try legacy [role="radio"] pattern
+    const videosRadio = findByText('[role="radio"]', 'Videos');
+    if (videosRadio) {
+      videosRadio.click();
+      await this.delay(500);
+      console.log('[VideoFlowController] Switched to Videos tab via radio button');
       return;
     }
 
-    const videosRadio = findByText('[role="radio"]', 'Videos');
-    if (!videosRadio) throw new Error('Videos tab radio not found');
-    videosRadio.click();
-
-    await this.waitFor(
-      () => {
-        const active = document.querySelector('button[role="radio"][aria-checked="true"]');
-        return active?.textContent?.includes('Videos') ?? false;
-      },
-      'Videos tab active',
-      10000
-    );
-    await this.delay(500);
-    console.log('[VideoFlowController] Switched to Videos tab');
+    // Soft-fail: UI may not have a separate Videos tab anymore
+    console.log('[VideoFlowController] Videos tab/filter not found — continuing without switching (UI may have changed)');
   }
 
   /**
@@ -2248,27 +2734,22 @@ class VideoFlowController {
   async waitForInitialCompletion(): Promise<void> {
     const config = this.stepConfig['waitForInitialComplete'];
 
-    // Wait for percentage to disappear (generation finished)
-    await this.waitFor(
-      () => {
-        const allText = document.body.innerText || '';
-        const hasPercentage = /\d{1,3}%/.test(allText);
-        return !hasPercentage;
-      },
-      'generation percentage to disappear',
-      config.timeoutMs
-    );
-
-    // Delay 1s to let UI render success indicator
-    await this.delay(1000);
-
-    // Check for success indicator - if not present, generation failed
-    const hasAddToScene = findButtonByText('Add to scene') !== null;
-    if (!hasAddToScene) {
-      throw new Error('Generation failed - no success indicator');
+    // Use flowVideoTracker for reliable MutationObserver-based completion detection
+    // Start tracker if not already active
+    if (!flowVideoTracker.isActive()) {
+      flowVideoTracker.start();
     }
 
-    console.log('[VideoFlowController] Initial generation complete');
+    // Wait for video completion using the generalized tracker
+    // expectedCount = 1 for initial generation (single video)
+    try {
+      const newUUIDs = await flowVideoTracker.waitForNewImages(1, config.timeoutMs);
+      console.log('[VideoFlowController] Initial generation complete, new video UUIDs:', newUUIDs);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.log('[VideoFlowController] waitForInitialCompletion failed:', errorMsg);
+      throw new Error(`Generation failed: ${errorMsg}`);
+    }
   }
 
   /**
@@ -2649,24 +3130,27 @@ class VideoFlowController {
           }
 
           // Phase 3: Initial generation
-          // Snapshot existing video UUIDs before generation (to diff afterwards)
-          const videoUuidsBefore = new Set(this.captureVideoUuids());
+          // Start video tracker and snapshot before generation
+          if (!flowVideoTracker.isActive()) {
+            flowVideoTracker.start();
+          }
+          const snapshotBefore = flowVideoTracker.getSnapshot();
 
           await this.executeStep('fillPrompt', () => this.fillPrompt(config.prompts[0]), 0, config.prompts.length);
           await this.executeStep('clickCreate', () => this.clickCreate(), 0, config.prompts.length);
           await this.executeStep('waitForInitialComplete', () => this.waitForInitialCompletion(), 0, config.prompts.length);
 
-          // Capture newly generated video UUID(s) by diffing with snapshot
-          const videoUuidsAfter = this.captureVideoUuids();
-          const newVideoUuids = videoUuidsAfter.filter(u => !videoUuidsBefore.has(u));
+          // Get newly generated video UUID(s) from tracker
+          const newVideoUuids = flowVideoTracker.getNewImages(snapshotBefore);
           if (newVideoUuids.length > 0) {
             videoUuids.push(...newVideoUuids);
-            console.log(`[VideoFlowController] New video UUID(s):`, newVideoUuids);
+            console.log(`[VideoFlowController] New video UUID(s) from tracker:`, newVideoUuids);
           } else {
-            // Fallback: if no new UUIDs found (e.g., DOM didn't update yet), take the last one
-            if (videoUuidsAfter.length > 0) {
-              videoUuids.push(videoUuidsAfter[videoUuidsAfter.length - 1]);
-              console.log(`[VideoFlowController] Fallback: using last video UUID:`, videoUuidsAfter[videoUuidsAfter.length - 1]);
+            // Fallback: try captureVideoUuids() if tracker didn't pick up (e.g., lazy video element loading)
+            const fallbackUuids = this.captureVideoUuids();
+            if (fallbackUuids.length > 0) {
+              videoUuids.push(fallbackUuids[fallbackUuids.length - 1]);
+              console.log(`[VideoFlowController] Fallback: using last video UUID:`, fallbackUuids[fallbackUuids.length - 1]);
             }
           }
 
@@ -2751,10 +3235,14 @@ class VideoFlowController {
         downloaded = true;
       }
 
+      // Stop video tracker
+      flowVideoTracker.stop();
+
       return { success: true, completedPrompts, downloaded, videoUuids };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('[VideoFlowController] Workflow failed:', errorMsg);
+      flowVideoTracker.stop();
       return { success: false, error: errorMsg, completedPrompts, downloaded, videoUuids };
     }
   }
@@ -3298,13 +3786,12 @@ class ImageFlowController {
    * Step: Ensure we're in "Create Image" mode
    */
   async ensureCreateImageMode(): Promise<void> {
-    // Use Main World to click Radix tabs (content script clicks don't register)
-    const result = await chrome.runtime.sendMessage({
-      action: 'CONFIGURE_FLOW_SETTINGS',
-      mode: 'image',
-    });
+    const result = await configureFlowSettings({ mode: 'image' }, 'ImageFlow');
     if (!result?.success) {
       throw new Error(`Switch to image mode failed: ${result?.error || 'unknown'}`);
+    }
+    if (result.results?.mode === false) {
+      throw new Error('Switch to image mode: tab click did not activate image mode');
     }
     console.log('[ImageFlowController] Switched to Create Image mode via Main World');
     await new Promise(r => setTimeout(r, 300));
@@ -3314,14 +3801,13 @@ class ImageFlowController {
    * Step: Configure settings (aspect ratio + output count) via Radix config popper
    */
   async configureSettings(aspectRatio: '9:16' | '16:9', imageCount: number): Promise<void> {
-    // Use Main World to click Radix tabs (content script clicks don't register)
-    const result = await chrome.runtime.sendMessage({
-      action: 'CONFIGURE_FLOW_SETTINGS',
-      aspectRatio,
-      imageCount,
-    });
+    const result = await configureFlowSettings({ aspectRatio, imageCount }, 'ImageFlow');
     if (!result?.success) {
-      throw new Error(`Configure settings failed: ${result?.error || 'unknown'}`);
+      throw new Error(`Configure image settings failed: ${result?.error || 'unknown'}`);
+    }
+    const r = result.results || {};
+    if (r.ratio === false || r.count === false) {
+      throw new Error(`Configure image settings: partial failure (ratio=${r.ratio}, count=${r.count})`);
     }
     console.log('[ImageFlowController] Settings configured via Main World:', result.results);
     await new Promise(r => setTimeout(r, 300));
@@ -3330,209 +3816,18 @@ class ImageFlowController {
   // ─── "Add To Prompt" by UUID (for reference images already in gallery) ───
 
   /**
-   * Find the gallery scroll container by structural properties.
-   * Works for both Images and Videos galleries — detects the overflow:auto div
-   * that contains media elements (img or video).
-   */
-  private findImageGalleryScrollContainer(): HTMLElement | null {
-    const allDivs = document.querySelectorAll('div');
-    for (const el of allDivs) {
-      const style = getComputedStyle(el);
-      const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' ||
-                            style.overflowY === 'auto' || style.overflowY === 'scroll';
-      if (isScrollable && el.scrollHeight > el.clientHeight + 100 && (el as HTMLElement).clientHeight > 200) {
-        if (el.querySelectorAll('img[alt="Generated image"]').length > 0) {
-          return el as HTMLElement;
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Find a gallery image by UUID using incremental scroll.
-   * The gallery may be virtualized (especially with many images), so we scroll
-   * step-by-step and check at each position.
-   */
-  private async scrollToFindImageByUuid(imageUuid: string): Promise<HTMLElement | null> {
-    const container = this.findImageGalleryScrollContainer();
-    if (!container) {
-      console.warn('[ImageFlowController] Gallery scroll container not found');
-      // Fallback: try direct query without scrolling
-      return document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
-    }
-
-    const clientHeight = container.clientHeight;
-    const stepSize = Math.floor(clientHeight * 0.7);
-    const maxSteps = Math.ceil(container.scrollHeight / stepSize) + 2;
-
-    container.scrollTop = 0;
-    await this.delay(300);
-
-    for (let step = 0; step < maxSteps; step++) {
-      const imgEl = document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
-      if (imgEl) {
-        console.log(`[ImageFlowController] Found image UUID ${imageUuid.substring(0, 8)}... at scroll step ${step}`);
-        return imgEl;
-      }
-
-      container.scrollTop += stepSize;
-      await this.delay(500);
-
-      if (container.scrollTop + container.clientHeight >= container.scrollHeight - 10) {
-        const lastCheck = document.querySelector(`img[src*="${imageUuid}"]`) as HTMLElement | null;
-        if (lastCheck) return lastCheck;
-        break;
-      }
-    }
-
-    console.log(`[ImageFlowController] Image UUID ${imageUuid.substring(0, 8)}... not found after scrolling`);
-    return null;
-  }
-
-  /**
    * Click "Add To Prompt" on an image in the gallery by its UUID.
    * This adds the image as an ingredient/reference for the next generation,
    * replacing the old upload→crop→save flow.
    */
   async clickAddToPromptByImageUuid(imageUuid: string): Promise<void> {
-    console.log(`[ImageFlowController] Adding image ${imageUuid.substring(0, 8)}... to prompt via gallery`);
-
-    // Gallery now shows images directly — no tab switch needed
-    await this.delay(300);
-
-    // Find the image by scrolling incrementally
-    const img = await this.scrollToFindImageByUuid(imageUuid);
-    if (!img) throw new Error(`Gallery image not found for UUID: ${imageUuid}`);
-
-    // Check if image is already added as an ingredient.
-    // After clicking "Add to Prompt", an ingredient chip appears in the prompt bar
-    // with an img whose src contains the image UUID.
-    const alreadyAdded = !!document.querySelector(`button img[alt*="piece of media"][src*="${imageUuid}"]`);
-    if (alreadyAdded) {
-      console.log(`[ImageFlowController] Image ${imageUuid.substring(0, 8)}... already added as ingredient (chip in prompt bar), skipping`);
-      return;
-    }
-
-    // Hover over the image container to reveal the toolbar with More button
-    const hoverTargets: HTMLElement[] = [];
-    let el: HTMLElement | null = img;
-    for (let i = 0; i < 5 && el; i++) {
-      el = el.parentElement;
-      if (el) hoverTargets.push(el);
-    }
-    for (const target of hoverTargets) {
-      target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    }
-    await this.delay(300);
-
-    // Find the "More" button (more_vert) in the toolbar near this image.
-    // Walk up from img to the tile container, then find toolbar > button with "more_vert" icon.
-    let moreBtn: HTMLButtonElement | null = null;
-    let searchRoot: Element | null = img;
-    for (let i = 0; i < 6 && searchRoot; i++) {
-      searchRoot = searchRoot.parentElement;
-      if (searchRoot) {
-        const toolbar = searchRoot.querySelector('[role="toolbar"]');
-        if (toolbar) {
-          const buttons = toolbar.querySelectorAll('button');
-          for (const btn of buttons) {
-            if (btn.textContent?.includes('more_vert')) {
-              moreBtn = btn as HTMLButtonElement;
-              break;
-            }
-          }
-          if (moreBtn) break;
-        }
-      }
-    }
-
-    if (!moreBtn) {
-      // Fallback: try finding any button near the image with more_vert text
-      searchRoot = img;
-      for (let i = 0; i < 8 && searchRoot; i++) {
-        searchRoot = searchRoot.parentElement;
-        if (searchRoot) {
-          const buttons = searchRoot.querySelectorAll('button');
-          for (const btn of buttons) {
-            if (btn.textContent?.includes('more_vert') && btn.textContent?.includes('More')) {
-              moreBtn = btn as HTMLButtonElement;
-              break;
-            }
-          }
-          if (moreBtn) break;
-        }
-      }
-    }
-
-    if (!moreBtn) throw new Error(`"More" button not found in toolbar for image UUID: ${imageUuid}`);
-
-    // Click the More button using full synthetic event sequence.
-    // Radix UI menus don't respond to .click() from content script isolated world.
-    const rect = moreBtn.getBoundingClientRect();
-    const x = rect.x + rect.width / 2;
-    const y = rect.y + rect.height / 2;
-    const eventInit: PointerEventInit & MouseEventInit = {
-      bubbles: true, cancelable: true,
-      clientX: x, clientY: y, screenX: x, screenY: y,
-      view: window, button: 0, buttons: 1,
-    };
-    moreBtn.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerId: 1 }));
-    moreBtn.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerId: 1, bubbles: false }));
-    moreBtn.dispatchEvent(new MouseEvent('mouseover', eventInit));
-    moreBtn.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
-    moreBtn.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerId: 1 }));
-    moreBtn.dispatchEvent(new MouseEvent('mousedown', eventInit));
-    moreBtn.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerId: 1, buttons: 0 }));
-    moreBtn.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
-    moreBtn.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
-    console.log(`[ImageFlowController] Dispatched synthetic click on More button for image ${imageUuid.substring(0, 8)}...`);
-
-    // Wait for the menu to appear with "Add to Prompt" menuitem
-    let addMenuItem: HTMLElement | null = null;
-    await this.waitFor(
-      () => {
-        const menuItems = document.querySelectorAll('[role="menuitem"]');
-        for (const item of menuItems) {
-          if (item.textContent?.includes('Add to Prompt')) {
-            addMenuItem = item as HTMLElement;
-            return true;
-          }
-        }
-        return false;
-      },
-      `"Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}`,
-      5000
+    await FlowUIActions.addImageToPrompt(
+      imageUuid,
+      (condition, name, timeout) => this.waitFor(condition, name, timeout),
+      (ms) => this.delay(ms),
+      10000,
+      'ImageFlowController',
     );
-
-    if (!addMenuItem) throw new Error(`"Add to Prompt" menuitem not found for image UUID: ${imageUuid}`);
-
-    // Click the "Add to Prompt" menuitem using same synthetic event pattern
-    const miRect = (addMenuItem as HTMLElement).getBoundingClientRect();
-    const miX = miRect.x + miRect.width / 2;
-    const miY = miRect.y + miRect.height / 2;
-    const miInit: PointerEventInit & MouseEventInit = {
-      bubbles: true, cancelable: true,
-      clientX: miX, clientY: miY, screenX: miX, screenY: miY,
-      view: window, button: 0, buttons: 1,
-    };
-    (addMenuItem as HTMLElement).dispatchEvent(new PointerEvent('pointerdown', { ...miInit, pointerId: 1 }));
-    (addMenuItem as HTMLElement).dispatchEvent(new MouseEvent('mousedown', miInit));
-    (addMenuItem as HTMLElement).dispatchEvent(new PointerEvent('pointerup', { ...miInit, pointerId: 1, buttons: 0 }));
-    (addMenuItem as HTMLElement).dispatchEvent(new MouseEvent('mouseup', { ...miInit, buttons: 0 }));
-    (addMenuItem as HTMLElement).dispatchEvent(new MouseEvent('click', { ...miInit, buttons: 0 }));
-    console.log(`[ImageFlowController] Dispatched synthetic click on "Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}...`);
-    console.log(`[ImageFlowController] Clicked "Add to Prompt" menuitem for image ${imageUuid.substring(0, 8)}...`);
-
-    // Wait for confirmation — ingredient chip with matching UUID appears in the prompt bar
-    await this.waitFor(
-      () => !!document.querySelector(`button img[alt*="piece of media"][src*="${imageUuid}"]`),
-      `ingredient chip for image ${imageUuid.substring(0, 8)}`,
-      10000
-    );
-    await this.delay(500);
-    console.log(`[ImageFlowController] Added image ${imageUuid.substring(0, 8)}... to prompt as ingredient`);
   }
 
   // Store the click interceptor so we can remove it after upload
@@ -4409,14 +4704,13 @@ class ImageFlowController {
 
     // Configure mode + settings via Main World (Radix tabs don't respond to content script clicks).
     // background.ts runs the entire popper interaction in chrome.scripting.executeScript({ world: 'MAIN' }).
-    const result = await chrome.runtime.sendMessage({
-      action: 'CONFIGURE_FLOW_SETTINGS',
-      mode: 'image',
-      aspectRatio,
-      imageCount,
-    });
+    const result = await configureFlowSettings({ mode: 'image', aspectRatio, imageCount }, 'ImageFlow');
     if (!result?.success) {
-      throw new Error(`Configure settings failed: ${result?.error || 'unknown'}`);
+      throw new Error(`Configure story settings failed: ${result?.error || 'unknown'}`);
+    }
+    const r = result.results || {};
+    if (r.mode === false || r.ratio === false || r.count === false) {
+      throw new Error(`Configure story settings: partial failure (mode=${r.mode}, ratio=${r.ratio}, count=${r.count})`);
     }
     console.log('[ImageFlowController] Settings configured via Main World:', result.results);
     await this.delay(500);

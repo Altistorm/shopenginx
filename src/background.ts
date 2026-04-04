@@ -245,6 +245,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const log = (msg: string) => console.log(`[CONFIGURE_FLOW_SETTINGS] ${msg}`);
 
         async function run() {
+          try {
           // Find the config trigger button
           const findTrigger = (): HTMLElement | null => {
             const buttons = document.querySelectorAll('button[aria-haspopup="menu"]');
@@ -279,11 +280,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           // Open config popper
           const trigger = findTrigger();
-          if (!trigger) return { ok: false, err: 'Config trigger button not found' };
+          if (!trigger) {
+            log('Trigger NOT found. Buttons scanned: ' + document.querySelectorAll('button[aria-haspopup="menu"]').length);
+            return { ok: false, err: 'Config trigger button not found' };
+          }
+          log('Trigger found: ' + (trigger.textContent || '').trim().substring(0, 50));
 
-          if (trigger.getAttribute('aria-expanded') !== 'true' && trigger.getAttribute('data-state') !== 'open') {
+          const wasExpanded = trigger.getAttribute('aria-expanded') === 'true' || trigger.getAttribute('data-state') === 'open';
+          if (!wasExpanded) {
+            log('Opening popper (trigger not expanded)');
             await clickElement(trigger);
             await wait(800);
+          } else {
+            log('Popper already expanded');
           }
 
           const getPopper = () =>
@@ -297,11 +306,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (overlay) { await clickElement(overlay); await wait(800); }
             popper = getPopper();
           }
-          if (!popper) return { ok: false, err: 'Config popper did not open' };
+          if (!popper) { log('Popper did NOT open after both attempts'); return { ok: false, err: 'Config popper did not open' }; }
 
           // Helper: find and click a tab
           const clickTab = async (iconMatch: string | null, textMatch: string | null): Promise<boolean> => {
-            const tabs = (getPopper() || popper).querySelectorAll('button[role="tab"]');
+            const currentPopper = getPopper() || popper;
+            const tabs = currentPopper.querySelectorAll('button[role="tab"]');
+            log(`clickTab(icon=${iconMatch}, text=${textMatch}): ${tabs.length} tabs found`);
             for (const tab of tabs) {
               if (iconMatch) {
                 const icon = tab.querySelector('i');
@@ -311,12 +322,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (txt !== textMatch && txt !== textMatch.replace('x', '')) continue;
               }
               if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') {
-                return true; // already active
+                log(`  Tab '${iconMatch || textMatch}' already active`);
+                return true;
               }
+              log(`  Clicking tab '${iconMatch || textMatch}'...`);
               await clickElement(tab as HTMLElement);
               await wait(600);
               // Re-check with fresh reference
-              const freshTabs = (getPopper() || popper).querySelectorAll('button[role="tab"]');
+              const freshPopper = getPopper() || popper;
+              const freshTabs = freshPopper.querySelectorAll('button[role="tab"]');
+              log(`  Re-check: ${freshTabs.length} tabs in ${freshPopper === currentPopper ? 'same' : 'NEW'} popper`);
               for (const ft of freshTabs) {
                 if (iconMatch) {
                   const fi = ft.querySelector('i');
@@ -325,10 +340,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   const txt = (ft.textContent || '').trim().toLowerCase();
                   if (txt !== textMatch && txt !== textMatch.replace('x', '')) continue;
                 }
-                return ft.getAttribute('data-state') === 'active' || ft.getAttribute('aria-selected') === 'true';
+                const isActive = ft.getAttribute('data-state') === 'active' || ft.getAttribute('aria-selected') === 'true';
+                log(`  Tab '${iconMatch || textMatch}' re-check: state=${ft.getAttribute('data-state')} selected=${ft.getAttribute('aria-selected')} => ${isActive}`);
+                return isActive;
               }
+              log(`  Tab '${iconMatch || textMatch}' LOST after click (not found in fresh popper)`);
               return false;
             }
+            log(`  No tab matched '${iconMatch || textMatch}'`);
             return false;
           };
 
@@ -364,8 +383,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await wait(300);
 
           return { ok: true, results };
+          } catch (e: any) {
+            log(`UNCAUGHT ERROR: ${e?.message || e}`);
+            return { ok: false, err: `Uncaught: ${e?.message || e}` };
+          }
         }
 
+        log(`Starting: mode=${mode}, aspectRatio=${aspectRatio}, imageCount=${imageCount}`);
         return run();
       },
       args: [mode, aspectRatio, imageCount],
