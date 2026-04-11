@@ -210,6 +210,8 @@ class FlowGenerationTracker {
   private lastPercentage: number = 0;
   private isGenerating: boolean = false;
   private generationFailed: boolean = false;
+  private activePercentageNodes: Set<Node> = new Set();
+  private percentageGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private config: GenerationTrackerConfig) {}
 
@@ -365,6 +367,11 @@ class FlowGenerationTracker {
       this.completionTimeout = null;
     }
 
+    if (this.percentageGraceTimer) {
+      clearTimeout(this.percentageGraceTimer);
+      this.percentageGraceTimer = null;
+    }
+
     this.isGenerating = false;
   }
 
@@ -374,6 +381,37 @@ class FlowGenerationTracker {
       console.log(`[Flow${this.config.name}Tracker] 📊 Percentage update:`, this.lastPercentage, '->', percentage);
       this.lastPercentage = percentage;
     }
+  }
+
+  // Layer 2: Start grace timer when a percentage node changes to non-percentage text
+  // Waits 5 seconds for a success signal (new UUID or play_circle) before declaring failure
+  private startPercentageGraceTimer() {
+    // Don't start multiple grace timers
+    if (this.percentageGraceTimer) return;
+
+    console.log(`[Flow${this.config.name}Tracker] ⏳ Starting percentage-gone grace timer (5s)`);
+    this.percentageGraceTimer = setTimeout(() => {
+      this.percentageGraceTimer = null;
+      if (!this.isGenerating || this.generationFailed) return;
+
+      // Check if a new UUID arrived (success signal)
+      if (this.detectedNewUUIDs.size > 0) {
+        console.log(`[Flow${this.config.name}Tracker] Grace timer: new UUIDs detected, not an error`);
+        return;
+      }
+
+      // Check for error containers
+      const errorText = this.detectErrorContainers();
+      if (errorText) {
+        console.log(`[Flow${this.config.name}Tracker] ❌ Grace timer: error detected:`, errorText);
+        this.handleGenerationError(errorText);
+        return;
+      }
+
+      // No success signal and no explicit error found after grace period
+      console.log(`[Flow${this.config.name}Tracker] ❌ Grace timer: percentage disappeared with no success signal`);
+      this.handleGenerationError('Generation failed: progress indicator disappeared without producing results');
+    }, 5000);
   }
 
   // Handle generation error detected from DOM
@@ -536,21 +574,46 @@ class FlowGenerationTracker {
           }
         }
 
-        // Log characterData changes (text content updates) - percentage tracking
+        // Log characterData changes (text content updates) - percentage tracking + error detection
         if (mutation.type === 'characterData') {
           const textContent = (mutation.target as Text).textContent?.trim();
           if (textContent) {
-            // Check if it's a percentage number (just digits, no % symbol)
-            const percentMatch = textContent.match(/^(\d{1,3})$/);
-            if (percentMatch) {
-              const percentage = parseInt(percentMatch[1], 10);
-              if (percentage >= 0 && percentage <= 100) {
-                this.handlePercentageUpdate(percentage);
+            const isPercentage = /^\d{1,3}%?$/.test(textContent);
+
+            if (isPercentage) {
+              // Check if it's a percentage number (just digits, no % symbol)
+              const percentMatch = textContent.match(/^(\d{1,3})$/);
+              if (percentMatch) {
+                const percentage = parseInt(percentMatch[1], 10);
+                if (percentage >= 0 && percentage <= 100) {
+                  this.handlePercentageUpdate(percentage);
+                }
               }
-            }
-            // Also check for XX% format
-            if (/^\d{1,3}%$/.test(textContent)) {
-              console.log(`[Flow${this.config.name}Tracker] 📊 Text content changed to percentage:`, textContent);
+              // Also check for XX% format
+              if (/^\d{1,3}%$/.test(textContent)) {
+                console.log(`[Flow${this.config.name}Tracker] 📊 Text content changed to percentage:`, textContent);
+              }
+              // Layer 2: Track this node as showing a percentage
+              if (this.isGenerating) {
+                this.activePercentageNodes.add(mutation.target);
+              }
+            } else {
+              // Layer 1: Non-percentage text in characterData - check for error patterns
+              if (this.isGenerating) {
+                for (const pattern of this.config.errorTextPatterns) {
+                  if (textContent.includes(pattern)) {
+                    console.log(`[Flow${this.config.name}Tracker] ❌ Error detected in characterData:`, textContent.substring(0, 80));
+                    this.handleGenerationError(textContent);
+                    break;
+                  }
+                }
+              }
+              // Layer 2: If this node was tracking a percentage, it changed to non-percentage
+              if (this.isGenerating && this.activePercentageNodes.has(mutation.target)) {
+                this.activePercentageNodes.delete(mutation.target);
+                console.log(`[Flow${this.config.name}Tracker] ⚠️ Percentage node changed to non-percentage:`, textContent.substring(0, 50));
+                this.startPercentageGraceTimer();
+              }
             }
           }
         }
@@ -575,6 +638,15 @@ class FlowGenerationTracker {
         console.log(`[Flow${this.config.name}Tracker] ✅ Relevant changes detected, updating item order...`);
         // Debounce updates
         setTimeout(() => this.updateItemOrder(), 100);
+      }
+
+      // Layer 3: Proactive error detection after relevant DOM changes
+      if (this.isGenerating && hasRelevantChanges) {
+        const err = this.detectErrorContainers();
+        if (err) {
+          console.log(`[Flow${this.config.name}Tracker] ❌ Proactive error detection:`, err);
+          this.handleGenerationError(err);
+        }
       }
     };
 
@@ -603,6 +675,10 @@ class FlowGenerationTracker {
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
+    }
+    if (this.percentageGraceTimer) {
+      clearTimeout(this.percentageGraceTimer);
+      this.percentageGraceTimer = null;
     }
     this.isTracking = false;
     console.log(`[Flow${this.config.name}Tracker] Stopped tracking`);
@@ -639,7 +715,12 @@ class FlowGenerationTracker {
     this.isGenerating = false;
     this.generationFailed = false;
     this.lastPercentage = 0;
+    this.activePercentageNodes.clear();
 
+    if (this.percentageGraceTimer) {
+      clearTimeout(this.percentageGraceTimer);
+      this.percentageGraceTimer = null;
+    }
     if (this.completionTimeout) {
       clearTimeout(this.completionTimeout);
       this.completionTimeout = null;

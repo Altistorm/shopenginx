@@ -159,7 +159,7 @@ export function useVideoWorkflow() {
     setCurrentImageIndex(null)
 
     try {
-      const results: { success: boolean; error?: string; completedPrompts?: number }[] = []
+      const results: { success: boolean; error?: string; completedPrompts?: number; videoUuids?: string[] }[] = []
 
       for (let jobIndex = 0; jobIndex < jobs.length; jobIndex++) {
         if (stopRequestedRef.current) {
