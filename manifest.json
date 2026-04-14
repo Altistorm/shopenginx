@@ -34,13 +34,27 @@
   "content_scripts": [
     {
       "matches": ["*://*.google/*", "*://labs.google/*"],
-      "js": ["src/content.ts"],
-      "run_at": "document_idle"
+      "js": ["src/content-bridge.ts"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["*://*.google/*", "*://labs.google/*"],
+      "js": ["src/content-main.ts"],
+      "run_at": "document_idle",
+      "world": "MAIN"
     },
     {
       "matches": ["https://www.tiktok.com/*", "https://tiktok.com/*"],
-      "js": ["src/content.ts"],
-      "run_at": "document_idle"
+      "js": ["src/content-bridge.ts"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["https://www.tiktok.com/*", "https://tiktok.com/*"],
+      "js": ["src/content-main.ts"],
+      "run_at": "document_idle",
+      "world": "MAIN"
     }
   ],
   "icons": {
