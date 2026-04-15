@@ -954,6 +954,109 @@ const findByText = (selector: string, text: string): HTMLElement | null => {
   return null;
 };
 
+// ─── Slate editor helper (MAIN world direct access) ───
+
+/**
+ * Insert text into the Slate editor by traversing React's internal fiber tree.
+ * content-main.ts now runs in MAIN world, so we can access __reactFiber$ properties directly.
+ * Returns true on success, false on failure.
+ */
+const insertTextViaSlateFiber = (text: string): boolean => {
+  try {
+    // Find all elements with React fiber keys
+    const allElements = document.querySelectorAll('*');
+    let slateEditor: any = null;
+
+    for (const el of allElements) {
+      // React stores fiber on the DOM element as __reactFiber$ + random suffix
+      const keys = Object.keys(el);
+      for (const key of keys) {
+        if (!key.startsWith('__reactFiber$')) continue;
+        const fiber: any = (el as any)[key];
+        if (!fiber) continue;
+
+        // Walk the fiber tree looking for Slate's insertText method
+        let current: any = fiber;
+        const visited = new WeakSet();
+        const maxDepth = 30;
+        let depth = 0;
+
+        while (current && depth < maxDepth && !visited.has(current)) {
+          visited.add(current);
+
+          // Check if this fiber node has slate editor methods
+          if (
+            current.stateNode &&
+            typeof current.stateNode.insertText === 'function' &&
+            typeof current.stateNode.children !== 'undefined'
+          ) {
+            slateEditor = current.stateNode;
+            break;
+          }
+
+          // Also check the return/alternate fiber (React uses this for double-buffering)
+          if (current.alternate && !visited.has(current.alternate)) {
+            current = current.alternate;
+            depth++;
+            continue;
+          }
+
+          current = current.return;
+          depth++;
+        }
+
+        if (slateEditor) break;
+      }
+      if (slateEditor) break;
+    }
+
+    if (!slateEditor) {
+      console.warn('[SlateHelper] No Slate editor instance found via fiber traversal');
+      return false;
+    }
+
+    // Position cursor at end of existing content
+    const children = slateEditor.children;
+    if (children && children.length > 0) {
+      slateEditor.selection = {
+        anchor: { path: [children.length - 1, 0], offset: 0 },
+        focus: { path: [children.length - 1, 0], offset: 0 },
+      };
+      slateEditor.deleteBackward(1000); // Clear existing text
+    }
+
+    // Insert the new text
+    slateEditor.insertText(text);
+    return true;
+  } catch (e) {
+    console.warn('[SlateHelper] Direct fiber insertion failed:', e);
+    return false;
+  }
+};
+
+/**
+ * Fill the prompt using direct Slate fiber access in MAIN world.
+ * Falls back to standard DOM input if Slate insertion fails.
+ */
+const fillPromptViaSlateFiber = (prompt: string): boolean => {
+  // First try direct Slate fiber insertion (Phase 2 — MAIN world)
+  if (insertTextViaSlateFiber(prompt)) {
+    return true;
+  }
+
+  // Fallback: standard DOM textbox input
+  const textbox = document.querySelector('textarea, input[type="text"]') as HTMLTextAreaElement | HTMLInputElement | null;
+  if (textbox) {
+    textbox.focus();
+    textbox.value = prompt;
+    textbox.dispatchEvent(new Event('input', { bubbles: true }));
+    textbox.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+
+  return false;
+};
+
 // ─── Radix UI helpers (adapted from KubdeeAutogen's working Google Flow selectors) ───
 
 /** Find the config trigger button using Radix UI patterns (replaces old combobox approach) */
@@ -972,174 +1075,7 @@ const findConfigTriggerButton = (): HTMLElement | null => {
   return null;
 };
 
-/** Click a Radix trigger button using pointer events (required for Radix to register) */
-const clickRadixTrigger = async (element: HTMLElement): Promise<void> => {
-  const rect = element.getBoundingClientRect();
-  const opts: PointerEventInit = {
-    bubbles: true, cancelable: true, pointerType: 'mouse',
-    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-  };
-  element.dispatchEvent(new PointerEvent('pointerdown', opts));
-  await new Promise(r => setTimeout(r, 100));
-  element.dispatchEvent(new PointerEvent('pointerup', opts));
-  await new Promise(r => setTimeout(r, 100));
-  element.click();
-};
 
-/** Click a Radix tab — tries focus, click, then pointer events until active */
-const clickRadixTab = async (element: HTMLElement): Promise<void> => {
-  const isActive = () =>
-    element.getAttribute('data-state') === 'active' ||
-    element.getAttribute('aria-selected') === 'true';
-  element.focus();
-  await new Promise(r => setTimeout(r, 100));
-  if (isActive()) return;
-  element.click();
-  await new Promise(r => setTimeout(r, 100));
-  if (isActive()) return;
-  // Fallback: pointer events
-  const rect = element.getBoundingClientRect();
-  const opts: PointerEventInit = {
-    bubbles: true, cancelable: true, pointerType: 'mouse',
-    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-  };
-  element.dispatchEvent(new PointerEvent('pointerdown', opts));
-  await new Promise(r => setTimeout(r, 50));
-  element.dispatchEvent(new PointerEvent('pointerup', opts));
-  await new Promise(r => setTimeout(r, 50));
-  element.click();
-};
-
-/** Open the config popper from the trigger button. Returns popper element or null. */
-const openConfigPopper = async (): Promise<HTMLElement | null> => {
-  const triggerBtn = findConfigTriggerButton();
-  if (!triggerBtn) return null;
-  // If already open, return the popper
-  if (triggerBtn.getAttribute('aria-expanded') === 'true' || triggerBtn.getAttribute('data-state') === 'open') {
-    const existing = document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
-      document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
-    if (existing && existing.getBoundingClientRect().height > 0) return existing;
-  }
-  await clickRadixTrigger(triggerBtn);
-  await new Promise(r => setTimeout(r, 800));
-  // Find the opened popper
-  let popper = document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
-    document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
-  if (popper && popper.getBoundingClientRect().height > 0) return popper;
-  // Fallback: try clicking the overlay child
-  const overlay = triggerBtn.querySelector('[data-type="button-overlay"]') as HTMLElement;
-  if (overlay) {
-    await clickRadixTrigger(overlay);
-    await new Promise(r => setTimeout(r, 800));
-  }
-  popper = document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
-    document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
-  if (popper && popper.getBoundingClientRect().height > 0) return popper;
-  return null;
-};
-
-/** Close the config popper via Escape + body click */
-const closeConfigPopper = async (): Promise<void> => {
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-  await new Promise(r => setTimeout(r, 200));
-  document.body.click();
-  await new Promise(r => setTimeout(r, 300));
-};
-
-/** Re-fetch the open popper element (may have been re-rendered) */
-const refetchPopper = (): HTMLElement | null => {
-  return document.querySelector('[data-radix-menu-content][data-state="open"]') as HTMLElement ||
-    document.querySelector('[role="menu"][data-state="open"]') as HTMLElement;
-};
-
-/**
- * Select a mode tab (IMAGE or VIDEO) inside the config popper.
- * @param popper - The open popper element
- * @param mode - 'image' for Create Image, 'videocam' for Frames to Video
- */
-const selectModeTab = async (popper: HTMLElement, mode: 'image' | 'videocam'): Promise<boolean> => {
-  const targetLabel = mode === 'image' ? 'IMAGE' : 'VIDEO';
-  const tabs = popper.querySelectorAll('button[role="tab"]');
-  for (const tab of tabs) {
-    const icon = tab.querySelector('i');
-    if (!icon) continue;
-    const iconText = (icon.textContent || '').trim().toLowerCase();
-    if (iconText !== mode) continue;
-    // Already active?
-    if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') return true;
-    await clickRadixTab(tab as HTMLElement);
-    await new Promise(r => setTimeout(r, 500));
-    return tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true';
-  }
-  // Fallback: match via aria-controls
-  for (const tab of tabs) {
-    const controls = (tab.getAttribute('aria-controls') || '').toUpperCase();
-    if (controls.includes(targetLabel)) {
-      await clickRadixTab(tab as HTMLElement);
-      await new Promise(r => setTimeout(r, 500));
-      return true;
-    }
-  }
-  return false;
-};
-
-/**
- * Select aspect ratio tab inside the config popper.
- * Finds button[role="tab"] with <i> icon 'crop_9_16' or 'crop_16_9'.
- */
-const selectAspectRatioTab = async (popper: HTMLElement, aspectRatio: '9:16' | '16:9'): Promise<boolean> => {
-  const isPortrait = aspectRatio === '9:16';
-  const targetIcon = isPortrait ? 'crop_9_16' : 'crop_16_9';
-  const tabs = popper.querySelectorAll('button[role="tab"]');
-  for (const tab of tabs) {
-    const icon = tab.querySelector('i');
-    if (!icon) continue;
-    const iconText = (icon.textContent || '').trim().toLowerCase();
-    if (iconText !== targetIcon) continue;
-    if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') return true;
-    await clickRadixTab(tab as HTMLElement);
-    await new Promise(r => setTimeout(r, 500));
-    return tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true';
-  }
-  // Fallback: match via aria-controls
-  const targetLabel = isPortrait ? 'PORTRAIT' : 'LANDSCAPE';
-  for (const tab of tabs) {
-    const controls = (tab.getAttribute('aria-controls') || '').toUpperCase();
-    if (controls.includes(targetLabel)) {
-      await clickRadixTab(tab as HTMLElement);
-      await new Promise(r => setTimeout(r, 500));
-      return true;
-    }
-  }
-  return false;
-};
-
-/**
- * Select output count tab inside the config popper.
- * Looks for button[role="tab"] with text 'x{count}' or '{count}'.
- */
-const selectOutputCountTab = async (popper: HTMLElement, outputCount: number): Promise<boolean> => {
-  const targetText = `x${outputCount}`;
-  const tabs = popper.querySelectorAll('button[role="tab"]');
-  for (const tab of tabs) {
-    const txt = (tab.textContent || '').trim().toLowerCase();
-    if (txt !== targetText && txt !== String(outputCount)) continue;
-    if (tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true') return true;
-    await clickRadixTab(tab as HTMLElement);
-    await new Promise(r => setTimeout(r, 500));
-    return tab.getAttribute('data-state') === 'active' || tab.getAttribute('aria-selected') === 'true';
-  }
-  // Fallback: match via aria-controls
-  for (const tab of tabs) {
-    const controls = tab.getAttribute('aria-controls') || '';
-    if (controls.endsWith(`-${outputCount}`)) {
-      await clickRadixTab(tab as HTMLElement);
-      await new Promise(r => setTimeout(r, 500));
-      return true;
-    }
-  }
-  return false;
-};
 
 /**
  * Check current settings from the trigger button (without opening popper).
@@ -1183,17 +1119,6 @@ async function configureFlowSettings(
   const log = (msg: string) => console.log(`[${tag}:CONFIGURE] ${msg}`);
 
   const clickElement = async (el: HTMLElement) => {
-    const rect = el.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', clientX: x, clientY: y, isPrimary: true }));
-    await wait(50);
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-    await wait(50);
-    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', clientX: x, clientY: y, isPrimary: true }));
-    await wait(50);
-    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-    await wait(50);
     el.click();
   };
 
@@ -1322,27 +1247,11 @@ async function configureFlowSettings(
 
 const FlowUIActions = {
   /**
-   * Dispatch full synthetic pointer+mouse click event sequence on an element.
-   * Radix UI components require this instead of simple .click().
+   * Click an element using simple .click().
+   * content-main.ts now runs in the MAIN world, so .click() works natively.
    */
   dispatchSyntheticClick(el: HTMLElement): void {
-    const rect = el.getBoundingClientRect();
-    const x = rect.x + rect.width / 2;
-    const y = rect.y + rect.height / 2;
-    const eventInit: PointerEventInit & MouseEventInit = {
-      bubbles: true, cancelable: true,
-      clientX: x, clientY: y, screenX: x, screenY: y,
-      view: window, button: 0, buttons: 1,
-    };
-    el.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerId: 1 }));
-    el.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerId: 1, bubbles: false }));
-    el.dispatchEvent(new MouseEvent('mouseover', eventInit));
-    el.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
-    el.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerId: 1 }));
-    el.dispatchEvent(new MouseEvent('mousedown', eventInit));
-    el.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerId: 1, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
+    el.click();
   },
 
   /** Find the gallery scroll container by detecting overflow:auto div with generated images. */
@@ -2394,59 +2303,11 @@ class VideoFlowController {
   }
 
   /**
-   * Simulate a real click on a button using CSS override + full synthetic pointer/mouse events.
-   * This is needed because Flow's video cards use CSS :hover to show/hide overlay buttons,
-   * and parent divs have pointer-events: none. A simple element.click() won't trigger
-   * React's business logic properly.
-   *
-   * Approach (validated via Playwright simulation):
-   * 1. Force button visible via inline style overrides
-   * 2. Fix pointer-events: none on ancestor divs
-   * 3. Dispatch full pointer → mouse event sequence with real coordinates
+   * Click a button using simple .click().
+   * content-main.ts now runs in the MAIN world, so .click() works natively.
    */
   private simulateRealClick(button: HTMLButtonElement): void {
-    // Step 1: Force button visible
-    button.style.cssText = 'display: flex !important; opacity: 1 !important; visibility: visible !important; pointer-events: auto !important; filter: none !important; transform: none !important;';
-
-    // Step 2: Fix parent chain — remove pointer-events: none from ancestors
-    let el: HTMLElement | null = button.parentElement;
-    for (let i = 0; i < 5 && el; i++) {
-      const style = window.getComputedStyle(el);
-      if (style.pointerEvents === 'none') {
-        el.style.pointerEvents = 'auto';
-      }
-      el = el.parentElement;
-    }
-
-    // Step 3: Get button coordinates
-    const rect = button.getBoundingClientRect();
-    const x = rect.x + rect.width / 2;
-    const y = rect.y + rect.height / 2;
-
-    const eventInit: PointerEventInit & MouseEventInit = {
-      bubbles: true,
-      cancelable: true,
-      clientX: x,
-      clientY: y,
-      screenX: x,
-      screenY: y,
-      view: window,
-      button: 0,
-      buttons: 1,
-    };
-
-    // Step 4: Dispatch hover sequence (triggers React's onPointerDown etc.)
-    button.dispatchEvent(new PointerEvent('pointerover', { ...eventInit, pointerId: 1 }));
-    button.dispatchEvent(new PointerEvent('pointerenter', { ...eventInit, pointerId: 1, bubbles: false }));
-    button.dispatchEvent(new MouseEvent('mouseover', eventInit));
-    button.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
-
-    // Step 5: Dispatch click sequence
-    button.dispatchEvent(new PointerEvent('pointerdown', { ...eventInit, pointerId: 1 }));
-    button.dispatchEvent(new MouseEvent('mousedown', eventInit));
-    button.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, pointerId: 1, buttons: 0 }));
-    button.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
-    button.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
+    button.click();
   }
 
   /**
@@ -2742,12 +2603,8 @@ class VideoFlowController {
     // Wait for UI to be fully ready before interacting with prompt
     await this.delay(1000);
 
-    // Slate editor lives in Main World — content script can't access its React state.
-    // Send to background.ts which uses chrome.scripting.executeScript({ world: 'MAIN' })
-    // to walk React fiber tree and call slateEditor.insertText() directly.
-    // Slate insert handled directly via window.postMessage bridge in ISOLATED world
-    // No longer using chrome.runtime.sendMessage for SLATE_INSERT_TEXT
-    const result = { success: true }; // no-op since Slate is handled by bridge
+    // Fill the Slate editor directly (MAIN world — Phase 2)
+    fillPromptViaSlateFiber(prompt);
     await this.delay(500);
 
     // Wait for Create button to become enabled
@@ -4230,11 +4087,8 @@ class ImageFlowController {
   async fillPrompt(prompt: string): Promise<void> {
     const config = this.stepConfig['fillPrompt'];
 
-    // Slate editor lives in Main World — content script can't access its React state.
-    // Send to background.ts which uses chrome.scripting.executeScript({ world: 'MAIN' })
-    // to walk React fiber tree and call slateEditor.insertText() directly.
-    // Slate insert handled directly via window.postMessage bridge in ISOLATED world
-    const result = { success: true }; // no-op since Slate is handled by bridge
+    // Fill the Slate editor directly (MAIN world — Phase 2)
+    fillPromptViaSlateFiber(prompt);
     await this.delay(500);
 
     // Wait for Create button to be enabled
