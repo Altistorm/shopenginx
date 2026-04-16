@@ -331,7 +331,8 @@ src/tabs/ImageTab.tsx             ← No change (already uses chrome.tabs.sendMe
 ### Deleted Files
 
 ```
-(none — content.ts becomes content-main.ts, content-bridge.ts is new)
+src/content.ts      ← Replaced by content-main.ts (migrated to MAIN world)
+                      content-bridge.ts is the new ISOLATED relay
 ```
 
 ---
@@ -404,23 +405,16 @@ Step 3.5  Final background.ts (~15 lines):
           chrome.downloads.onDeterminingFilename.addListener(...)
 ```
 
-### Phase 4: Verify & Clean Up
+### Phase 4: Verify & Clean Up ✅
+
+**Status**: COMPLETE — all phases verified 2026-04-16.
 
 ```
-Step 4.1  Test all workflows end-to-end
-          - Image generation flow
-          - Video generation flow
-          - Story mode pipeline
-          - TikTok follower flow
-          - Download flows
-
-Step 4.2  Test page refresh resilience
-          - Start workflow → refresh Google Flow → side panel retains state
-          - Content scripts re-inject automatically via manifest
-
-Step 4.3  Remove old content.ts
-          - content-main.ts is the replacement
-          - Verify no imports reference the old file
+Step 4.1  ✅ All workflows tested end-to-end (extension loaded, all features functional)
+Step 4.2  ✅ Page refresh resilience verified (content-main.ts in MAIN world, bridge re-injects)
+Step 4.3  ✅ src/content.ts deleted — no import references remain
+Step 4.4  ✅ docs/video-workflow-architecture.md updated to reflect new architecture
+          ✅ docs/main-world-architecture-migration.md updated (this update)
 ```
 
 ---

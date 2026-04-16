@@ -8,7 +8,7 @@ The video generation workflow is implemented in `shopenginx/src/content.ts` via 
 
 | File | Purpose |
 |------|---------|
-| `shopenginx/src/content.ts` | `VideoFlowController` class, step functions, execution engine |
+| `shopenginx/src/content-main.ts` | `VideoFlowController` class, step functions, execution engine |
 | `shopenginx/src/tabs/VideoTab.tsx` | Sidebar UI — photo upload, prompts, settings, progress display |
 | `shopenginx/src/background.ts` | Chrome extension background script |
 
@@ -30,12 +30,18 @@ VideoTab.tsx (Sidebar)
     │  chrome.tabs.sendMessage({ type: 'START_VIDEO_WORKFLOW', image, prompts, ... })
     │
     ▼
-content.ts (Content Script)
+content-bridge.ts (ISOLATED WORLD)
+    │
+    │  chrome.runtime.onMessage → window.postMessage
+    │
+    ▼
+content-main.ts (MAIN WORLD)
     │
     │  Receives message → Creates VideoFlowController → executeSet()
     │
     │  Progress events sent back via:
-    │  chrome.runtime.sendMessage({ type: 'VIDEO_PROGRESS', step, status, ... })
+    │  window.postMessage → bridge relays → chrome.runtime.sendMessage
+    │  ({ type: 'VIDEO_PROGRESS', step, status, ... })
     │
     ▼
 VideoTab.tsx (Sidebar)
@@ -45,6 +51,8 @@ VideoTab.tsx (Sidebar)
     ▼
   Result returned via sendResponse()
 ```
+
+**Note**: All logic runs in MAIN world. The ISOLATED bridge is a pure relay with no workflow logic.
 
 ---
 
